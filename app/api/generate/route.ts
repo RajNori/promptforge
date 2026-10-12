@@ -9,6 +9,7 @@ import {
   type Brief,
   type Clarification,
 } from "@/lib/forge";
+import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -39,7 +40,8 @@ function limited(ip: string) {
 type Body =
   | { mode: "analyze"; brief: Brief }
   | { mode: "generate"; brief: Brief; clarifications: Clarification[] }
-  | { mode: "refine"; brief: Brief; prompt: string; feedback: string };
+  | { mode: "refine"; brief: Brief; prompt: string; feedback: string }
+  | { mode: "suggest"; brief: Brief; field: SuggestField | "all" };
 
 function json(status: number, data: unknown) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -69,7 +71,16 @@ export async function POST(req: NextRequest) {
   }
   if (!body?.brief) return json(400, { error: "Brief is required." });
   body.brief = migrateBrief(body.brief);
-  if (!body.brief.objective.trim() && body.mode !== "refine") return json(400, { error: "Objective is required." });
+  if (!body.brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
+
+  // Field suggestions resolve which fields to fill before building messages.
+  let suggestFields: SuggestField[] = [];
+  if (body.mode === "suggest") {
+    if (!hasSignal(body.brief)) return json(400, { error: "Add an objective or some context first." });
+    const allowed = applicableFields(body.brief);
+    suggestFields = body.field === "all" ? allowed.filter((f) => isEmpty(body.brief, f)) : allowed.includes(body.field) ? [body.field] : [];
+    if (!suggestFields.length) return json(400, { error: body.field === "all" ? "Nothing to fill — all fields have values." : "Unknown field." });
+  }
 
   const guidance = targetGuidance(body.brief.target);
 
@@ -77,7 +88,14 @@ export async function POST(req: NextRequest) {
   let stream = true;
   let temperature = 0.4;
 
-  if (body.mode === "analyze") {
+  if (body.mode === "suggest") {
+    stream = false;
+    temperature = 0.5;
+    messages = [
+      { role: "system", content: SUGGEST_SYSTEM },
+      { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${briefToText(body.brief)}\n\n${suggestRequest(body.brief, suggestFields)}` },
+    ];
+  } else if (body.mode === "analyze") {
     stream = false;
     temperature = 0.2;
     messages = [
@@ -111,16 +129,17 @@ export async function POST(req: NextRequest) {
         messages,
         stream,
         temperature,
-        max_tokens: body.brief.chain ? 9000 : 4500,
+        max_tokens: body.mode === "suggest" ? 1500 : body.brief.chain ? 9000 : 4500,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
 
   let upstream: Response;
   try {
-    upstream = await call(body.mode === "analyze");
+    const jsonOut = body.mode === "analyze" || body.mode === "suggest";
+    upstream = await call(jsonOut);
     // Some models reject response_format — retry once without it (prompt already demands JSON).
-    if (!upstream.ok && body.mode === "analyze" && upstream.status === 400) upstream = await call(false);
+    if (!upstream.ok && jsonOut && upstream.status === 400) upstream = await call(false);
   } catch (e) {
     console.error("[generate] upstream unreachable", e);
     return json(502, { error: GENERIC_FAIL });
@@ -138,6 +157,30 @@ export async function POST(req: NextRequest) {
     const data = await upstream.json().catch(() => null);
     const raw: string = data?.choices?.[0]?.message?.content ?? "";
     const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+    if (body.mode === "suggest") {
+      try {
+        const parsed = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
+        const values: Record<string, unknown> = {};
+        for (const f of suggestFields) {
+          const v = parsed[f];
+          if (f === "rules" && Array.isArray(v)) {
+            const rules = v
+              .filter((x) => x && typeof x.rule === "string" && x.rule.trim())
+              .slice(0, 6)
+              .map((x) => ({ rule: String(x.rule).trim().slice(0, 300), why: typeof x.why === "string" ? x.why.trim().slice(0, 300) : "" }));
+            if (rules.length) values.rules = rules;
+          } else if (typeof v === "string" && v.trim()) {
+            values[f] = v.trim().slice(0, 3000);
+          } else if (Array.isArray(v) && f === "successCriteria") {
+            values[f] = v.map(String).join("\n").slice(0, 3000);
+          }
+        }
+        if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
+        return json(200, { values });
+      } catch {
+        return json(502, { error: "No suggestion produced. Try again." });
+      }
+    }
     try {
       const parsed = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
       return json(200, {

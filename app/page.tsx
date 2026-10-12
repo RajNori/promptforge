@@ -19,6 +19,9 @@ import {
   type Rule,
 } from "@/lib/forge";
 import { Select } from "./Select";
+import { ExampleMenu, FieldLabel, Sparkle, StarIcon } from "./ui";
+import { exampleBrief, type ExampleBrief } from "@/lib/examples";
+import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
 
 type Stage = "brief" | "clarify" | "forge";
 type Theme = "system" | "light" | "dark";
@@ -35,22 +38,6 @@ const REFINE_PRESETS = [
   "Add an independent reviewer pass",
 ];
 
-const EXAMPLE: Brief = {
-  ...EMPTY_BRIEF,
-  target: "claude-code",
-  taskType: "Build a feature",
-  objective: "Add Stripe Checkout subscriptions (monthly + annual) to our SaaS with webhook-driven entitlement updates.",
-  context: "Next.js 16 App Router, TypeScript, Supabase (Postgres + RLS + Auth), deployed on Vercel. Users table exists; no billing yet.",
-  inputs: "Stripe test keys in .env.local, price IDs for both plans, existing /settings page.",
-  deliverable: "Working checkout flow, webhook handler, entitlements table + RLS, billing section in /settings.",
-  successCriteria:
-    "Test-mode purchase upgrades the user within 5s via webhook\nCancelling in the Stripe portal downgrades at period end\nWebhook is idempotent and signature-verified\nAll tests, typecheck, and build pass",
-  rules: [
-    { rule: "Never trust plan state from the client", why: "entitlements must be server-authoritative or users can self-upgrade" },
-    { rule: "No new UI libraries", why: "bundle budget and design-system consistency" },
-    { rule: "Do not touch auth flows", why: "out of scope and high blast radius" },
-  ],
-};
 
 const THEME_ICONS = {
   system: (
@@ -108,6 +95,9 @@ export default function Page() {
   const [theme, setTheme] = useState<Theme>("system");
   const abortRef = useRef<AbortController | null>(null);
   const verSeq = useRef(0);
+  const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
+  const [toast, setToast] = useState<{ msg: string; prev?: Brief } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetch("/api/generate")
@@ -155,6 +145,18 @@ export default function Page() {
   const canAI = server?.configured;
   const ready = brief.objective.trim().length > 8;
   const isApi = brief.target === "api-system";
+  const signal = hasSignal(brief);
+  const blanks = applicableFields(brief).filter((f) => isEmpty(brief, f));
+  const spark = (f: SuggestField) =>
+    canAI ? (
+      <Sparkle
+        label={FIELD_HELP[f].label}
+        filled={!isEmpty(brief, f)}
+        loading={sparking === f || (sparking === "all" && isEmpty(brief, f))}
+        disabled={(f !== "objective" && !signal) || (f === "objective" && !signal && !brief.objective.trim()) || (!!sparking && sparking !== f)}
+        onClick={() => suggest(f)}
+      />
+    ) : null;
 
   const headers = useMemo(() => {
     const h: Record<string, string> = { "content-type": "application/json" };
@@ -222,6 +224,42 @@ export default function Page() {
       });
       if (fixed) pushVersion(fixed, "auto-repair");
     }
+  }
+
+  function showToast(msg: string, prev?: Brief) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ msg, prev });
+    toastTimer.current = setTimeout(() => setToast(null), 9000);
+  }
+
+  async function suggest(field: SuggestField | "all") {
+    if (sparking) return;
+    setError("");
+    persistPrefs();
+    setSparking(field);
+    const prev = brief;
+    try {
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Suggestion failed");
+      const values = d.values as Partial<Brief>;
+      const keys = Object.keys(values) as SuggestField[];
+      setBrief((b) => ({ ...b, ...values }));
+      const names = keys.map((k) => FIELD_HELP[k].label);
+      showToast(field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}: ${names.join(", ")}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`, prev);
+    } catch (e) {
+      showToast((e as Error).message);
+    } finally {
+      setSparking(null);
+    }
+  }
+
+  function loadExample(ex: ExampleBrief) {
+    setBrief(exampleBrief(ex));
+    setAnalysis(null);
+    setAnswers([]);
+    setStage("brief");
+    showToast(`Loaded example: ${ex.name}`, brief);
   }
 
   async function analyze() {
@@ -333,9 +371,7 @@ export default function Page() {
               </button>
             </nav>
             <div style={{ display: "flex", gap: 6 }}>
-              <button className="btn ghost sm" onClick={() => setBrief(EXAMPLE)}>
-                Load example
-              </button>
+              <ExampleMenu onPick={loadExample} currentType={brief.taskType} />
               <button
                 className="btn ghost sm"
                 onClick={() => {
@@ -373,9 +409,7 @@ export default function Page() {
                     <Select ariaLabel="Task type" value={brief.taskType} onChange={(v) => set("taskType", v)} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
                   </div>
                   <div className="field">
-                    <label>
-                      Role <em>optional — inferred if blank</em>
-                    </label>
+                    <FieldLabel field="role" label="Role" hint="optional" spark={spark("role")} />
                     <input type="text" value={brief.role} onChange={(e) => set("role", e.target.value)} placeholder="Principal engineer, Next.js + Supabase" />
                   </div>
                 </div>
@@ -403,34 +437,28 @@ export default function Page() {
                 </div>
 
                 <div className="field">
-                  <label>
-                    <span>
-                      Objective <span className="req">*</span>
-                    </span>
-                    <em>what must be accomplished</em>
-                  </label>
+                  <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
                   <textarea rows={3} value={brief.objective} onChange={(e) => set("objective", e.target.value)} placeholder="Implement…, migrate…, write…, analyse…" />
                 </div>
 
                 <div className="field">
-                  <label>
-                    {fw.id === "bab" ? "Before — current state" : "Context"} <em>{fw.id === "bab" ? "what exists today and what's wrong with it" : "stack, background, situation"}</em>
-                  </label>
+                  <FieldLabel
+                    field="context"
+                    label={fw.id === "bab" ? "Before — current state" : "Context"}
+                    hint={fw.id === "bab" ? "what exists today, what's wrong" : "stack, background, situation"}
+                    spark={spark("context")}
+                  />
                   <textarea rows={3} value={brief.context} onChange={(e) => set("context", e.target.value)} placeholder="Next.js 16, TypeScript, Supabase RLS, Vercel…" />
                 </div>
 
                 {fw.usesAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
-                      <label>
-                        Audience <em>{fw.name}</em>
-                      </label>
+                      <FieldLabel field="audience" label="Audience" hint={fw.name} spark={spark("audience")} />
                       <input type="text" value={brief.audience} onChange={(e) => set("audience", e.target.value)} placeholder="Technical founders evaluating vendors" />
                     </div>
                     <div className="field">
-                      <label>
-                        Tone <em>{fw.name}</em>
-                      </label>
+                      <FieldLabel field="tone" label="Tone" hint={fw.name} spark={spark("tone")} />
                       <input type="text" value={brief.tone} onChange={(e) => set("tone", e.target.value)} placeholder="Direct, credible, zero hype" />
                     </div>
                   </div>
@@ -438,21 +466,17 @@ export default function Page() {
 
                 <div className="row">
                   <div className="field">
-                    <label>Deliverable</label>
+                    <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
                     <textarea rows={2} value={brief.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder="PR-ready feature, article, spec…" />
                   </div>
                   <div className="field">
-                    <label>
-                      Success criteria <em>one per line</em>
-                    </label>
+                    <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
                     <textarea rows={2} value={brief.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder="Tests pass, p95 < 200ms…" />
                   </div>
                 </div>
 
                 <div className="field">
-                  <label>
-                    Rules <em>the why makes models follow them</em>
-                  </label>
+                  <FieldLabel field="rules" label="Rules" hint="the why makes models follow them" spark={spark("rules")} />
                   <div className="rules">
                     {brief.rules.map((r, i) => (
                       <div className="rule" key={i}>
@@ -477,15 +501,11 @@ export default function Page() {
                 {isApi && (
                   <div className="row reveal">
                     <div className="field">
-                      <label>
-                        Prefill <em>first assistant tokens</em>
-                      </label>
+                      <FieldLabel field="prefill" label="Prefill" hint="first assistant tokens" spark={spark("prefill")} />
                       <textarea rows={3} className="mono" value={brief.prefill} onChange={(e) => set("prefill", e.target.value)} placeholder={'{"result": '} />
                     </div>
                     <div className="field">
-                      <label>
-                        Output schema <em>JSON</em>
-                      </label>
+                      <FieldLabel field="outputSchema" label="Output schema" hint="JSON" spark={spark("outputSchema")} />
                       <textarea rows={3} className="mono" value={brief.outputSchema} onChange={(e) => set("outputSchema", e.target.value)} placeholder={'{ "type": "object", "properties": { … } }'} />
                     </div>
                   </div>
@@ -521,9 +541,7 @@ export default function Page() {
                   <summary>Advanced — examples, inputs, format, depth, extensions</summary>
 
                   <div className="field">
-                    <label>
-                      Few-shot examples <em>{brief.examples.length}/3 · rendered as &lt;example&gt; blocks</em>
-                    </label>
+                    <FieldLabel field="examples" label="Few-shot examples" hint={`${brief.examples.length}/3 · rendered as <example> blocks`} />
                     {brief.examples.map((ex, i) => (
                       <div className="example" key={i}>
                         <div className="example-h">
@@ -547,11 +565,11 @@ export default function Page() {
 
                   <div className="row">
                     <div className="field">
-                      <label>Inputs / assets</label>
+                      <FieldLabel field="inputs" label="Inputs / assets" spark={spark("inputs")} />
                       <textarea rows={2} value={brief.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder="Files, docs, keys, data available" />
                     </div>
                     <div className="field">
-                      <label>Response format</label>
+                      <FieldLabel field="outputFormat" label="Response format" spark={spark("outputFormat")} />
                       <textarea rows={2} value={brief.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder="Final report shape, length, structure" />
                     </div>
                   </div>
@@ -617,8 +635,18 @@ export default function Page() {
                   <button className="btn ghost" disabled={!ready || !!busy} onClick={() => instant()}>
                     Instant template
                   </button>
+                  {canAI && (
+                    <button
+                      className={`btn ghost ai ${sparking === "all" ? "busy" : ""}`}
+                      disabled={!signal || !blanks.length || !!sparking || !!busy}
+                      onClick={() => suggest("all")}
+                      title={!signal ? "Add an objective or context first" : blanks.length ? `AI fills: ${blanks.map((f) => FIELD_HELP[f].label).join(", ")}` : "No blank fields"}
+                    >
+                      {StarIcon} {sparking === "all" ? "Filling…" : `Autofill blanks${blanks.length ? ` (${blanks.length})` : ""}`}
+                    </button>
+                  )}
                 </div>
-                {!ready && <p className="note">Write an objective to continue.</p>}
+                {!ready && <p className="note">Write an objective to continue{canAI ? " — or add some context and use ✦ to draft it" : ""}.</p>}
               </>
             )}
 
@@ -734,6 +762,24 @@ export default function Page() {
           )}
         </section>
       </div>
+      {toast && (
+        <div className="toast" role="status">
+          <span>{toast.msg}</span>
+          {toast.prev && (
+            <button
+              onClick={() => {
+                setBrief(toast.prev!);
+                setToast(null);
+              }}
+            >
+              Undo
+            </button>
+          )}
+          <button aria-label="Dismiss" onClick={() => setToast(null)}>
+            ×
+          </button>
+        </div>
+      )}
       <p className="foot">Brief is saved locally in your browser. Prompts are generated server-side; nothing is stored.</p>
     </div>
   );
