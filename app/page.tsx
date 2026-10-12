@@ -86,6 +86,25 @@ function lengthTarget(feedback: string, current: number): number | null {
   return null;
 }
 
+/** Split a prompt into sections by heading (## X, <tag>, === PROMPT …) and give each a proportional word budget. */
+function sectionBudgets(text: string, target: number): string {
+  const total = countWords(text);
+  if (!total) return "";
+  const ratio = target / total;
+  const parts: { head: string; words: number }[] = [];
+  let cur = { head: "(preamble)", words: 0 };
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    const isHead = /^#{1,4}\s/.test(t) || /^<[a-z_]+>$/i.test(t) || t.startsWith("=== PROMPT");
+    if (isHead) {
+      if (cur.words) parts.push(cur);
+      cur = { head: t.replace(/^#+\s*/, "").slice(0, 60), words: 0 };
+    } else cur.words += countWords(t);
+  }
+  if (cur.words) parts.push(cur);
+  return parts.map((p) => `- ${p.head}: ${p.words} → ≤ ${Math.max(4, Math.round(p.words * ratio))} words`).join("\n");
+}
+
 const X = (
   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -329,7 +348,9 @@ export default function Page() {
       const before = countWords(current.text);
       const target = lengthTarget(text, before);
       // Give the model an explicit number — "cut 30%" alone is followed loosely.
-      const ask = target ? `${text}\n\nLENGTH TARGET: the current prompt is ${before} words; the revision must be ≤ ${target} words.` : text;
+      const ask = target
+        ? `${text}\n\nLENGTH TARGET: the current prompt is ${before} words; the revision must be ≤ ${target} words total. Per-section word budgets (current → max):\n${sectionBudgets(current.text, target)}\nHit each budget: merge overlapping bullets, cut restated context and filler, use terse imperative phrasing. Keep every heading, every rule with its reason, and every acceptance criterion.`
+        : text;
       let res = await stream({ mode: "refine", brief, prompt: current.text, feedback: ask });
       if (!res) return;
 
@@ -342,12 +363,14 @@ export default function Page() {
           mode: "refine",
           brief,
           prompt: res,
-          feedback: `This is ${got} words; it must be ≤ ${target} words. Cut ${got - target}+ words: remove redundancy, merge overlapping steps, drop filler and restated context, compress phrasing. Keep every section heading, every rule with its reason, and every acceptance criterion.`,
+          feedback: `Still too long: ${got} words, must be ≤ ${target}. Cut at least ${got - target} more words. Per-section budgets (current → max):\n${sectionBudgets(res, target)}\nCompress every section to its budget: one line per bullet, no restated context, no filler words. Keep every heading, every rule with its reason, and every acceptance criterion.`,
         });
         if (fixed) res = fixed;
         else return;
       }
-      pushVersion(res, target ? `${text.slice(0, 32)} (${countWords(res)}w)` : text.slice(0, 40));
+      const final = countWords(res);
+      pushVersion(res, target ? `${text.slice(0, 32)} (${final}w)` : text.slice(0, 40));
+      if (target && final > target * 1.1) showToast(`Closest result: ${before} → ${final} words (target ${target}). Refine again to cut further.`);
       setFeedback("");
     } finally {
       setBusy(null);
