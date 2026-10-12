@@ -22,7 +22,7 @@ import { Select } from "./Select";
 
 type Stage = "brief" | "clarify" | "forge";
 type Theme = "system" | "light" | "dark";
-type Version = { id: number; label: string; text: string; model: string; missing: string[] };
+type Version = { id: number; label: string; text: string; missing: string[] };
 
 const REFINE_PRESETS = [
   "Make it tighter — cut 30% without losing rules",
@@ -103,8 +103,7 @@ export default function Page() {
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [copied, setCopied] = useState(false);
-  const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean; defaultModel: string } | null>(null);
-  const [model, setModel] = useState("");
+  const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
   const [accessCode, setAccessCode] = useState("");
   const [theme, setTheme] = useState<Theme>("system");
   const abortRef = useRef<AbortController | null>(null);
@@ -114,14 +113,13 @@ export default function Page() {
     fetch("/api/generate")
       .then((r) => r.json())
       .then(setServer)
-      .catch(() => setServer({ configured: false, requiresAccessCode: false, defaultModel: "" }));
+      .catch(() => setServer({ configured: false, requiresAccessCode: false }));
     try {
       const saved = localStorage.getItem("risen-forge:brief");
       if (saved) setBrief(migrateBrief(JSON.parse(saved)));
       const ac = localStorage.getItem("risen-forge:access");
       if (ac) setAccessCode(ac);
-      const m = localStorage.getItem("risen-forge:model");
-      if (m) setModel(m);
+      localStorage.removeItem("risen-forge:model");
       const t = localStorage.getItem("risen-forge:theme");
       if (t === "light" || t === "dark") setTheme(t);
     } catch {}
@@ -167,19 +165,18 @@ export default function Page() {
   function persistPrefs() {
     try {
       localStorage.setItem("risen-forge:access", accessCode);
-      localStorage.setItem("risen-forge:model", model);
     } catch {}
   }
 
-  function pushVersion(text: string, label: string, m: string) {
+  function pushVersion(text: string, label: string) {
     const id = ++verSeq.current;
     const missing = missingSections(text, brief);
-    setVersions((vs) => [...vs, { id, label, text, model: m, missing }]);
+    setVersions((vs) => [...vs, { id, label, text, missing }]);
     setActive(id);
     return missing;
   }
 
-  async function stream(body: object): Promise<{ text: string; model: string } | null> {
+  async function stream(body: object): Promise<string | null> {
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -192,7 +189,6 @@ export default function Page() {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || `Request failed (${r.status})`);
       }
-      const m = r.headers.get("x-model") || model || server?.defaultModel || "";
       const reader = r.body!.getReader();
       const dec = new TextDecoder();
       while (true) {
@@ -202,8 +198,8 @@ export default function Page() {
         setStreaming(acc);
       }
       const clean = acc.replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
-      if (!clean) throw new Error("Empty response from model.");
-      return { text: clean, model: m };
+      if (!clean) throw new Error("Empty response. Please try again.");
+      return clean;
     } catch (e) {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
       return null;
@@ -213,19 +209,18 @@ export default function Page() {
   }
 
   /** Validate the framework contract; auto-repair once if headings are missing. */
-  async function finish(res: { text: string; model: string } | null, label: string) {
+  async function finish(res: string | null, label: string) {
     if (!res) return;
-    const missing = pushVersion(res.text, label, res.model);
+    const missing = pushVersion(res, label);
     if (missing.length) {
       setBusy("repair");
       const fixed = await stream({
         mode: "refine",
         brief,
-        prompt: res.text,
-        model,
+        prompt: res,
         feedback: `The prompt violates the ${fw.name} output contract. Restore these missing required sections with proper headings, in the correct order, without removing anything else: ${missing.join(", ")}.`,
       });
-      if (fixed) pushVersion(fixed.text, "auto-repair", fixed.model);
+      if (fixed) pushVersion(fixed, "auto-repair");
     }
   }
 
@@ -235,7 +230,7 @@ export default function Page() {
     persistPrefs();
     setBusy("analyze");
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, model }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
@@ -259,7 +254,7 @@ export default function Page() {
     persistPrefs();
     setBusy("generate");
     try {
-      await finish(await stream({ mode: "generate", brief, clarifications: clar, model }), `${fw.name}${brief.chain ? " chain" : ""}`);
+      await finish(await stream({ mode: "generate", brief, clarifications: clar }), `${fw.name}${brief.chain ? " chain" : ""}`);
     } finally {
       setBusy(null);
     }
@@ -270,9 +265,9 @@ export default function Page() {
     setError("");
     setBusy("refine");
     try {
-      const res = await stream({ mode: "refine", brief, prompt: current.text, feedback: text, model });
+      const res = await stream({ mode: "refine", brief, prompt: current.text, feedback: text });
       if (res) {
-        pushVersion(res.text, text.slice(0, 40), res.model);
+        pushVersion(res, text.slice(0, 40));
         setFeedback("");
       }
     } finally {
@@ -281,7 +276,7 @@ export default function Page() {
   }
 
   function instant(clar: Clarification[] = answers) {
-    pushVersion(compileTemplate(brief, clar), `${fw.name} template`, "offline");
+    pushVersion(compileTemplate(brief, clar), `${fw.name} template`);
     setStage("forge");
   }
 
@@ -523,7 +518,7 @@ export default function Page() {
                 </div>
 
                 <details>
-                  <summary>Advanced — examples, inputs, format, depth, extensions, model</summary>
+                  <summary>Advanced — examples, inputs, format, depth, extensions</summary>
 
                   <div className="field">
                     <label>
@@ -602,20 +597,12 @@ export default function Page() {
                       ))}
                     </div>
                   </div>
-                  <div className="row">
+                  {server?.requiresAccessCode && (
                     <div className="field">
-                      <label>
-                        Model <em>OpenRouter id</em>
-                      </label>
-                      <input type="text" value={model} onChange={(e) => setModel(e.target.value)} placeholder={server?.defaultModel || "deepseek/deepseek-v4.1-flash"} />
+                      <label>Access code</label>
+                      <input type="text" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} placeholder="Required" />
                     </div>
-                    {server?.requiresAccessCode && (
-                      <div className="field">
-                        <label>Access code</label>
-                        <input type="text" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} placeholder="Required" />
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </details>
 
                 <div className="actions">
@@ -683,7 +670,7 @@ export default function Page() {
             <div className="versions">
               {versions.length === 0 && <span className="note">Output</span>}
               {versions.map((v) => (
-                <button key={v.id} className={`ver ${v.id === active ? "on" : ""} ${v.missing.length ? "warn" : ""}`} onClick={() => setActive(v.id)} title={`${v.label} · ${v.model}`}>
+                <button key={v.id} className={`ver ${v.id === active ? "on" : ""} ${v.missing.length ? "warn" : ""}`} onClick={() => setActive(v.id)} title={v.label}>
                   v{v.id}
                 </button>
               ))}

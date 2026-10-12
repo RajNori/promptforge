@@ -20,13 +20,13 @@ The model analyses the brief, asks targeted gap questions, generates against a h
 
 ## Stack
 
-Next.js 16 (App Router) · React 19 · TypeScript · no UI dependencies · OpenRouter (streaming) · Vercel
+Next.js 16 (App Router) · React 19 · TypeScript · no UI dependencies · any OpenAI-compatible LLM API (streaming) · Vercel
 
 ```
 app/
   page.tsx               # UI: brief → clarify → forge/refine
   Select.tsx             # accessible themeable listbox
-  api/generate/route.ts  # analyze | generate | refine → OpenRouter (SSE re-streamed)
+  api/generate/route.ts  # analyze | generate | refine → server-side LLM wrapper (streamed)
 lib/
   forge.ts               # frameworks, auto-pick, contracts, validator, offline compiler
 ```
@@ -35,7 +35,7 @@ lib/
 
 ```bash
 npm install
-cp .env.example .env.local   # add your OpenRouter key
+cp .env.example .env.local   # add provider URL, key, model
 npm run dev
 ```
 
@@ -43,9 +43,12 @@ npm run dev
 
 | Var | Required | Notes |
 |---|---|---|
-| `OPEN_ROUTER_API_KEY` | yes | `OPENROUTER_API_KEY` is also accepted |
-| `OPENROUTER_MODEL` | no | Default `deepseek/deepseek-v4.1-flash`; any OpenRouter model id |
-| `ACCESS_CODE` | recommended | When set, the API requires this code (the UI prompts for it). Protects your credits on a public URL. |
+| `AI_BASE_URL` | yes | OpenAI-compatible base URL (the route calls `/chat/completions`) |
+| `AI_API_KEY` | yes | Provider API key |
+| `AI_MODEL` | yes | Model id |
+| `ACCESS_CODE` | recommended | When set, the API requires this code (the UI prompts for it) |
+
+The provider, model and upstream errors stay server-side. The browser only ever talks to `/api/generate`, and clients cannot override the model.
 
 Without a key the app still works in **Instant template** mode.
 

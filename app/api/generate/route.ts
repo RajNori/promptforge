@@ -13,10 +13,18 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-// Accept both spellings of the key env var.
-const API_KEY = () => process.env.OPENROUTER_API_KEY || process.env.OPEN_ROUTER_API_KEY;
-const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || process.env.OPEN_ROUTER_MODEL || "deepseek/deepseek-v4.1-flash";
+// Provider is fully server-side and env-driven (any OpenAI-compatible chat completions endpoint).
+// Nothing about the provider or model is ever sent to the browser.
+const cfg = () => ({
+  url: process.env.AI_BASE_URL?.replace(/\/+$/, "") ?? "",
+  // Legacy key name kept as a fallback; prefer AI_API_KEY.
+  key: process.env.AI_API_KEY || process.env.OPEN_ROUTER_API_KEY || "",
+  model: process.env.AI_MODEL ?? "",
+});
+const configured = () => {
+  const c = cfg();
+  return Boolean(c.url && c.key && c.model);
+};
 
 // Best-effort per-instance rate limit (20 req / 10 min / IP). Not a substitute for ACCESS_CODE.
 const hits = new Map<string, number[]>();
@@ -29,25 +37,23 @@ function limited(ip: string) {
 }
 
 type Body =
-  | { mode: "analyze"; brief: Brief; model?: string }
-  | { mode: "generate"; brief: Brief; clarifications: Clarification[]; model?: string }
-  | { mode: "refine"; brief: Brief; prompt: string; feedback: string; model?: string };
+  | { mode: "analyze"; brief: Brief }
+  | { mode: "generate"; brief: Brief; clarifications: Clarification[] }
+  | { mode: "refine"; brief: Brief; prompt: string; feedback: string };
 
 function json(status: number, data: unknown) {
-  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+const GENERIC_FAIL = "Generation failed. Please try again.";
+
 export async function GET() {
-  return json(200, {
-    configured: Boolean(API_KEY()),
-    requiresAccessCode: Boolean(process.env.ACCESS_CODE),
-    defaultModel: DEFAULT_MODEL,
-  });
+  return json(200, { configured: configured(), requiresAccessCode: Boolean(process.env.ACCESS_CODE) });
 }
 
 export async function POST(req: NextRequest) {
-  const key = API_KEY();
-  if (!key) return json(503, { error: "OPEN_ROUTER_API_KEY is not configured. Use Instant template mode or set the env var." });
+  if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode." });
+  const { url, key, model } = cfg();
 
   const code = process.env.ACCESS_CODE;
   if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code." });
@@ -65,7 +71,6 @@ export async function POST(req: NextRequest) {
   body.brief = migrateBrief(body.brief);
   if (!body.brief.objective.trim() && body.mode !== "refine") return json(400, { error: "Objective is required." });
 
-  const model = (body.model?.trim() || DEFAULT_MODEL).slice(0, 120);
   const guidance = targetGuidance(body.brief.target);
 
   let messages: { role: string; content: string }[];
@@ -98,14 +103,9 @@ export async function POST(req: NextRequest) {
   }
 
   const call = (jsonMode: boolean) =>
-    fetch(OPENROUTER_URL, {
+    fetch(`${url}/chat/completions`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": req.headers.get("origin") ?? "https://risen-forge.vercel.app",
-        "X-Title": "Prompt Forge",
-      },
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
         messages,
@@ -116,21 +116,26 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-  let upstream = await call(body.mode === "analyze");
-  // Some models reject response_format — retry once without it (prompt already demands JSON).
-  if (!upstream.ok && body.mode === "analyze" && upstream.status === 400) upstream = await call(false);
+  let upstream: Response;
+  try {
+    upstream = await call(body.mode === "analyze");
+    // Some models reject response_format — retry once without it (prompt already demands JSON).
+    if (!upstream.ok && body.mode === "analyze" && upstream.status === 400) upstream = await call(false);
+  } catch (e) {
+    console.error("[generate] upstream unreachable", e);
+    return json(502, { error: GENERIC_FAIL });
+  }
 
   if (!upstream.ok) {
-    const text = await upstream.text().catch(() => "");
-    let msg = text;
-    try {
-      msg = JSON.parse(text)?.error?.message ?? text;
-    } catch {}
-    return json(upstream.status, { error: `OpenRouter ${upstream.status}: ${msg.slice(0, 400)}` });
+    // Log the real error server-side only; never leak provider details to the client.
+    console.error("[generate] upstream error", upstream.status, (await upstream.text().catch(() => "")).slice(0, 1000));
+    if (upstream.status === 429) return json(429, { error: "The AI service is busy. Try again in a moment." });
+    if (upstream.status === 402) return json(503, { error: "AI generation is temporarily unavailable." });
+    return json(502, { error: GENERIC_FAIL });
   }
 
   if (!stream) {
-    const data = await upstream.json();
+    const data = await upstream.json().catch(() => null);
     const raw: string = data?.choices?.[0]?.message?.content ?? "";
     const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     try {
@@ -139,14 +144,13 @@ export async function POST(req: NextRequest) {
         score: Math.max(0, Math.min(100, Number(parsed.score) || 0)),
         gaps: Array.isArray(parsed.gaps) ? parsed.gaps.slice(0, 6) : [],
         questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 4) : [],
-        model,
       });
     } catch {
-      return json(200, { score: 50, gaps: [], questions: [], model, warning: "Analysis unparseable; skipped." });
+      return json(200, { score: 50, gaps: [], questions: [] });
     }
   }
 
-  // Re-stream OpenRouter SSE as plain text chunks.
+  // Re-stream upstream SSE as plain text chunks (content deltas only).
   const reader = upstream.body!.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -167,7 +171,10 @@ export async function POST(req: NextRequest) {
             if (payload === "[DONE]") continue;
             try {
               const evt = JSON.parse(payload);
-              if (evt.error) controller.enqueue(encoder.encode(`\n\n[error] ${evt.error.message ?? "stream error"}`));
+              if (evt.error) {
+                console.error("[generate] stream error", evt.error);
+                controller.enqueue(encoder.encode("\n\n[generation interrupted — try again]"));
+              }
               const delta = evt?.choices?.[0]?.delta?.content;
               if (delta) controller.enqueue(encoder.encode(delta));
             } catch {
@@ -175,13 +182,13 @@ export async function POST(req: NextRequest) {
             }
           }
         }
+      } catch (e) {
+        console.error("[generate] stream read failed", e);
       } finally {
         controller.close();
       }
     },
   });
 
-  return new Response(out, {
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-model": model },
-  });
+  return new Response(out, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
 }
