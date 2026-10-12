@@ -257,7 +257,7 @@ function parseSuggestions(text: string, fields: SuggestField[]): Record<string, 
       const rules = v
         .filter((x) => x && typeof x.rule === "string" && x.rule.trim())
         .slice(0, 6)
-        .map((x) => ({ rule: String(x.rule).trim().slice(0, 300), why: typeof x.why === "string" ? x.why.trim().slice(0, 300) : "" }));
+        .map((x) => ({ rule: String(x.rule).trim().slice(0, 300), why: typeof x.why === "string" ? lowerFirst(x.why.trim().replace(/^because\s+/i, "")).slice(0, 300) : "" }));
       if (rules.length) values.rules = rules;
     } else if (typeof v === "string" && v.trim()) {
       values[f] = v.trim().slice(0, 3000);
@@ -269,3 +269,6 @@ function parseSuggestions(text: string, fields: SuggestField[]): Record<string, 
   }
   return values;
 }
+
+// "because Prevents…" → "because prevents…" (keep acronyms like "API" intact).
+const lowerFirst = (t: string) => (/^[A-Z][a-z]/.test(t) ? t[0].toLowerCase() + t.slice(1) : t);
