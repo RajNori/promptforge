@@ -129,7 +129,8 @@ export async function POST(req: NextRequest) {
         messages,
         stream,
         temperature,
-        max_tokens: body.mode === "suggest" || body.mode === "analyze" ? 8000 : body.brief.chain ? 12000 : 8000, // ceilings; reasoning models spend hidden tokens first
+        // Ceilings: reasoning models spend hidden tokens first, but providers reserve credit against max_tokens.
+        max_tokens: body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : body.brief.chain ? 10000 : 6000,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
@@ -170,7 +171,7 @@ export async function POST(req: NextRequest) {
           body: JSON.stringify({
             model,
             temperature: 0.5,
-            max_tokens: 8000,
+            max_tokens: 5000,
             response_format: { type: "json_object" },
             messages: [
               { role: "system", content: SUGGEST_SYSTEM },
