@@ -95,6 +95,8 @@ export default function Page() {
   const [theme, setTheme] = useState<Theme>("system");
   const abortRef = useRef<AbortController | null>(null);
   const verSeq = useRef(0);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [, setTick] = useState(0);
   const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
   const [toast, setToast] = useState<{ msg: string; prev?: Brief } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -184,6 +186,7 @@ export default function Page() {
     abortRef.current = ctrl;
     setStreaming("");
     setStage("forge");
+    setStartedAt(Date.now());
     let acc = "";
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
@@ -197,16 +200,22 @@ export default function Page() {
         const { done, value } = await reader.read();
         if (done) break;
         acc += dec.decode(value, { stream: true });
-        setStreaming(acc);
+        const cut = acc.indexOf("\u0004");
+        setStreaming(cut < 0 ? acc : acc.slice(0, cut));
       }
-      const clean = acc.replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
+      const eot = acc.lastIndexOf("\u0004");
+      if (eot < 0) throw new Error("Generation was cut off before it finished. Try again — or use Lean depth for faster results.");
+      const status = acc.slice(eot + 1);
+      const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
       if (!clean) throw new Error("Empty response. Please try again.");
+      if (status === "len") setError("Output hit the length limit and may be incomplete — try Lean depth or turn off chain mode.");
       return clean;
     } catch (e) {
       if ((e as Error).name !== "AbortError") setError((e as Error).message);
       return null;
     } finally {
       setStreaming("");
+      setStartedAt(null);
     }
   }
 
@@ -334,6 +343,14 @@ export default function Page() {
     a.click();
     URL.revokeObjectURL(a.href);
   }
+
+  useEffect(() => {
+    if (!startedAt) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [startedAt]);
+  const elapsed = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
+  const thinking = streamingNow && !streaming;
 
   const words = shown ? shown.trim().split(/\s+/).length : 0;
   const chainCount = shown ? (shown.match(/^=== PROMPT/gm) || []).length : 0;
@@ -705,6 +722,7 @@ export default function Page() {
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {busy === "repair" && <span className="meta">repairing contract…</span>}
+              {streamingNow && <span className="meta">{thinking ? `thinking… ${elapsed}s` : `writing… ${elapsed}s`}</span>}
               {shown && <span className="meta">{chainCount > 1 ? `${chainCount} prompts · ` : ""}{words}w</span>}
               {streamingNow && (
                 <button className="btn sm" onClick={() => abortRef.current?.abort()}>
@@ -731,7 +749,9 @@ export default function Page() {
                 {streamingNow && <span className="caret" />}
               </>
             ) : streamingNow ? (
-              <span className="caret" />
+              <span className="thinking">
+                <span className="caret" /> {busy === "refine" ? "Applying your refinement" : busy === "repair" ? "Repairing missing sections" : "Planning the prompt"} — {elapsed}s
+              </span>
             ) : (
               "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
             )}

@@ -12,7 +12,7 @@ import {
 import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // Provider is fully server-side and env-driven (any OpenAI-compatible chat completions endpoint).
 // Nothing about the provider or model is ever sent to the browser.
@@ -21,7 +21,23 @@ const cfg = () => ({
   // Legacy key name kept as a fallback; prefer AI_API_KEY.
   key: process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || "",
   model: process.env.AI_MODEL ?? "",
+  // Optional provider-specific request params (e.g. reasoning controls), merged into every call. Server-side only.
+  extra: parseExtra(process.env.AI_EXTRA_BODY),
 });
+
+function parseExtra(raw?: string): Record<string, unknown> {
+  if (!raw?.trim()) return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    console.error("[config] AI_EXTRA_BODY is not valid JSON; ignoring");
+    return {};
+  }
+}
+
+// End-of-stream marker: the client only accepts output that ends with it, so cut-off streams are never saved.
+const EOT = "\u0004";
 const configured = () => {
   const c = cfg();
   return Boolean(c.url && c.key && c.model);
@@ -55,7 +71,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode." });
-  const { url, key, model } = cfg();
+  const { url, key, model, extra } = cfg();
 
   const code = process.env.ACCESS_CODE;
   if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code." });
@@ -125,6 +141,7 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
+        ...extra,
         model,
         messages,
         stream,
@@ -169,6 +186,7 @@ export async function POST(req: NextRequest) {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
           body: JSON.stringify({
+            ...extra,
             model,
             temperature: 0.5,
             max_tokens: 5000,
@@ -207,6 +225,8 @@ export async function POST(req: NextRequest) {
   const out = new ReadableStream({
     async start(controller) {
       let buf = "";
+      let finish: string | null = null;
+      let failed = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -223,18 +243,24 @@ export async function POST(req: NextRequest) {
               const evt = JSON.parse(payload);
               if (evt.error) {
                 console.error("[generate] stream error", evt.error);
-                controller.enqueue(encoder.encode("\n\n[generation interrupted — try again]"));
+                failed = true;
               }
-              const delta = evt?.choices?.[0]?.delta?.content;
+              const choice = evt?.choices?.[0];
+              const delta = choice?.delta?.content;
               if (delta) controller.enqueue(encoder.encode(delta));
+              if (choice?.finish_reason) finish = choice.finish_reason;
             } catch {
               /* keep-alive / partial */
             }
           }
         }
       } catch (e) {
+        failed = true;
         console.error("[generate] stream read failed", e);
       } finally {
+        // Signal a clean finish (or a length cut-off) so the client can tell complete output from a dropped stream.
+        if (!failed && finish) controller.enqueue(encoder.encode(EOT + (finish === "length" ? "len" : "ok")));
+        else console.error("[generate] stream ended without clean finish", { finish, failed });
         controller.close();
       }
     },
