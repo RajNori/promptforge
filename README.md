@@ -1,2 +1,54 @@
-# promptforge
-A Prompt creator using the most advanced prompting techniques
+# Prompt Forge
+
+One brief → production-grade prompts in **RISEN, CO-STAR, RTF, CRISPE, or BAB**.
+The model analyses the brief, asks targeted gap questions, generates against a hard section contract, validates the result, and lets you fine-tune with plain-English feedback.
+
+**Live:** https://risen-forge.vercel.app
+
+## Features
+
+- **Framework registry with auto-pick.** Inferred from task type and target (Writing → CO-STAR, Strategy → CRISPE, chat refactor → BAB, chat research/data → RTF, else RISEN). Can be overridden.
+- **Clarify step.** The model scores brief completeness and asks up to 4 high-leverage questions.
+- **Rules with reasons.** Each constraint carries a "because…", which models follow far more reliably than bare rules.
+- **Few-shot slots.** Up to 3 input→output pairs, rendered verbatim as `<example>` blocks.
+- **Chain mode.** Produces 2–4 sequenced prompts with explicit hand-off contracts instead of one mega-prompt.
+- **API target extras.** Assistant prefill and a JSON output schema.
+- **Agentic extensions.** Acceptance criteria, evidence gates, authority boundaries, Definition of Done, and self-critique.
+- **Contract validation.** Required headings are checked after generation, with one automatic repair pass if any are missing.
+- **Offline template mode.** Deterministic output for every framework with no API call.
+- **Light/dark/system themes.** Accessible custom dropdown and version history (v1, v2…), with `.md` export.
+
+## Stack
+
+Next.js 16 (App Router) · React 19 · TypeScript · no UI dependencies · OpenRouter (streaming) · Vercel
+
+```
+app/
+  page.tsx               # UI: brief → clarify → forge/refine
+  Select.tsx             # accessible themeable listbox
+  api/generate/route.ts  # analyze | generate | refine → OpenRouter (SSE re-streamed)
+lib/
+  forge.ts               # frameworks, auto-pick, contracts, validator, offline compiler
+```
+
+## Run locally
+
+```bash
+npm install
+cp .env.example .env.local   # add your OpenRouter key
+npm run dev
+```
+
+## Environment
+
+| Var | Required | Notes |
+|---|---|---|
+| `OPEN_ROUTER_API_KEY` | yes | `OPENROUTER_API_KEY` is also accepted |
+| `OPENROUTER_MODEL` | no | Default `deepseek/deepseek-v4.1-flash`; any OpenRouter model id |
+| `ACCESS_CODE` | recommended | When set, the API requires this code (the UI prompts for it). Protects your credits on a public URL. |
+
+Without a key the app still works in **Instant template** mode.
+
+## License
+
+MIT
