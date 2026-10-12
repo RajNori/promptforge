@@ -159,6 +159,8 @@ export async function POST(req: NextRequest) {
     const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     if (body.mode === "suggest") {
       const values = parseSuggestions(cleaned, suggestFields);
+      if (!Object.keys(values).length)
+        console.error("[suggest] unparseable", { finish: data?.choices?.[0]?.finish_reason, len: raw.length, head: raw.slice(0, 300), tail: raw.slice(-200) });
       // Models occasionally drop keys in multi-field requests — one targeted follow-up for the gaps.
       const missing = suggestFields.filter((f) => !(f in values));
       if (missing.length && Object.keys(values).length) {
