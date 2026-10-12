@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
         messages,
         stream,
         temperature,
-        max_tokens: body.mode === "suggest" ? 3000 : body.brief.chain ? 9000 : 4500,
+        max_tokens: body.mode === "suggest" || body.mode === "analyze" ? 8000 : body.brief.chain ? 12000 : 8000, // ceilings; reasoning models spend hidden tokens first
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
@@ -163,14 +163,14 @@ export async function POST(req: NextRequest) {
         console.error("[suggest] unparseable", { finish: data?.choices?.[0]?.finish_reason, len: raw.length, head: raw.slice(0, 300), tail: raw.slice(-200) });
       // Models occasionally drop keys in multi-field requests — one targeted follow-up for the gaps.
       const missing = suggestFields.filter((f) => !(f in values));
-      if (missing.length && Object.keys(values).length) {
+      if (missing.length) {
         const retry = await fetch(`${url}/chat/completions`, {
           method: "POST",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             model,
             temperature: 0.5,
-            max_tokens: 2000,
+            max_tokens: 8000,
             response_format: { type: "json_object" },
             messages: [
               { role: "system", content: SUGGEST_SYSTEM },
