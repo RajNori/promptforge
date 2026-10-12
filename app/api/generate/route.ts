@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
         messages,
         stream,
         temperature,
-        max_tokens: body.mode === "suggest" ? 1500 : body.brief.chain ? 9000 : 4500,
+        max_tokens: body.mode === "suggest" ? 3000 : body.brief.chain ? 9000 : 4500,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
@@ -158,28 +158,32 @@ export async function POST(req: NextRequest) {
     const raw: string = data?.choices?.[0]?.message?.content ?? "";
     const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     if (body.mode === "suggest") {
-      try {
-        const parsed = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
-        const values: Record<string, unknown> = {};
-        for (const f of suggestFields) {
-          const v = parsed[f];
-          if (f === "rules" && Array.isArray(v)) {
-            const rules = v
-              .filter((x) => x && typeof x.rule === "string" && x.rule.trim())
-              .slice(0, 6)
-              .map((x) => ({ rule: String(x.rule).trim().slice(0, 300), why: typeof x.why === "string" ? x.why.trim().slice(0, 300) : "" }));
-            if (rules.length) values.rules = rules;
-          } else if (typeof v === "string" && v.trim()) {
-            values[f] = v.trim().slice(0, 3000);
-          } else if (Array.isArray(v) && f === "successCriteria") {
-            values[f] = v.map(String).join("\n").slice(0, 3000);
-          }
+      const values = parseSuggestions(cleaned, suggestFields);
+      // Models occasionally drop keys in multi-field requests — one targeted follow-up for the gaps.
+      const missing = suggestFields.filter((f) => !(f in values));
+      if (missing.length && Object.keys(values).length) {
+        const retry = await fetch(`${url}/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            temperature: 0.5,
+            max_tokens: 2000,
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: SUGGEST_SYSTEM },
+              { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${briefToText({ ...body.brief, ...values } as Brief)}\n\n${suggestRequest(body.brief, missing)}` },
+            ],
+          }),
+        }).catch(() => null);
+        if (retry?.ok) {
+          const d2 = await retry.json().catch(() => null);
+          const raw2: string = d2?.choices?.[0]?.message?.content ?? "";
+          Object.assign(values, parseSuggestions(raw2.replace(/^```(?:json)?\s*|\s*```$/g, "").trim(), missing));
         }
-        if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
-        return json(200, { values });
-      } catch {
-        return json(502, { error: "No suggestion produced. Try again." });
       }
+      if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
+      return json(200, { values });
     }
     try {
       const parsed = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
@@ -234,4 +238,31 @@ export async function POST(req: NextRequest) {
   });
 
   return new Response(out, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+}
+
+function parseSuggestions(text: string, fields: SuggestField[]): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+  } catch {
+    return values;
+  }
+  for (const f of fields) {
+    const v = parsed[f];
+    if (f === "rules" && Array.isArray(v)) {
+      const rules = v
+        .filter((x) => x && typeof x.rule === "string" && x.rule.trim())
+        .slice(0, 6)
+        .map((x) => ({ rule: String(x.rule).trim().slice(0, 300), why: typeof x.why === "string" ? x.why.trim().slice(0, 300) : "" }));
+      if (rules.length) values.rules = rules;
+    } else if (typeof v === "string" && v.trim()) {
+      values[f] = v.trim().slice(0, 3000);
+    } else if (Array.isArray(v) && (f === "successCriteria" || f === "outputFormat")) {
+      values[f] = v.map(String).join("\n").slice(0, 3000);
+    } else if (v && typeof v === "object" && f === "outputSchema") {
+      values[f] = JSON.stringify(v);
+    }
+  }
+  return values;
 }

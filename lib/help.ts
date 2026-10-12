@@ -133,10 +133,11 @@ export const SUGGEST_SYSTEM = `You are a principal prompt engineer helping a use
 Rules:
 - Ground every value in what the brief already says (objective, context, target, task type, framework, other fields). Never contradict it.
 - Be concrete and specific to this task: real nouns, numbers, file names or audiences where the brief implies them. No generic filler.
-- Keep values short: one line for role/tone/audience, 1–3 sentences for objective/context/deliverable, 3–5 lines for success criteria, 3–5 rules.
+- Keep values tight: role/tone/audience ≤ 20 words; objective/context/deliverable ≤ 2 sentences; response format ≤ 2 sentences.
+- Success criteria: 3–5 lines, one testable check per line, each ≤ 18 words, no bullets or numbering, no "verified by…" instructions.
+- Rules: 3–5 items; rule ≤ 14 words; why ≤ 12 words, stating the consequence it prevents.
 - If a field already has a value, return an improved version that keeps the user's intent and specifics.
-- Success criteria: one testable check per line, no bullets or numbering.
-- Rules: each needs a short reason ("why").
+- You MUST return every requested key. Never omit a key.
 - Never invent secrets, credentials, or personal data.
 
 Respond with ONLY valid JSON, no prose, no code fences.`;
