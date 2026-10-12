@@ -18,7 +18,7 @@ export const maxDuration = 60;
 const cfg = () => ({
   url: process.env.AI_BASE_URL?.replace(/\/+$/, "") ?? "",
   // Legacy key name kept as a fallback; prefer AI_API_KEY.
-  key: process.env.AI_API_KEY || process.env.OPEN_ROUTER_API_KEY || "",
+  key: process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || "",
   model: process.env.AI_MODEL ?? "",
 });
 const configured = () => {
