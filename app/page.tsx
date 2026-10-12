@@ -72,6 +72,20 @@ function highlight(text: string) {
   });
 }
 
+const countWords = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
+
+/** Parse a length instruction ("cut 30%", "under 400 words", "halve it", "tighter") into a word target. */
+function lengthTarget(feedback: string, current: number): number | null {
+  const f = feedback.toLowerCase();
+  const abs = f.match(/(?:under|below|max(?:imum)?|at most|≤|<=?|to|within)\s*(\d{2,5})\s*words?/);
+  if (abs) return Math.min(Number(abs[1]), current);
+  const pct = f.match(/(?:cut|reduce|trim|shorten|shrink|tighten|tighter)[^%\d]{0,30}(\d{1,2})\s*%/) || f.match(/(\d{1,2})\s*%\s*(?:shorter|less|smaller|fewer)/);
+  if (pct) return Math.round(current * (1 - Number(pct[1]) / 100));
+  if (/\bhalve\b|\bhalf\b/.test(f)) return Math.round(current / 2);
+  if (/\b(tighter|tighten|shorter|more concise|condense)\b/.test(f)) return Math.round(current * 0.8);
+  return null;
+}
+
 const X = (
   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -312,11 +326,29 @@ export default function Page() {
     setError("");
     setBusy("refine");
     try {
-      const res = await stream({ mode: "refine", brief, prompt: current.text, feedback: text });
-      if (res) {
+      const before = countWords(current.text);
+      const target = lengthTarget(text, before);
+      // Give the model an explicit number — "cut 30%" alone is followed loosely.
+      const ask = target ? `${text}\n\nLENGTH TARGET: the current prompt is ${before} words; the revision must be ≤ ${target} words.` : text;
+      let res = await stream({ mode: "refine", brief, prompt: current.text, feedback: ask });
+      if (!res) return;
+
+      // One automatic retry if a length cut fell short (10% tolerance).
+      if (target && countWords(res) > target * 1.1) {
         pushVersion(res, text.slice(0, 40));
-        setFeedback("");
+        setBusy("repair");
+        const got = countWords(res);
+        const fixed = await stream({
+          mode: "refine",
+          brief,
+          prompt: res,
+          feedback: `This is ${got} words; it must be ≤ ${target} words. Cut ${got - target}+ words: remove redundancy, merge overlapping steps, drop filler and restated context, compress phrasing. Keep every section heading, every rule with its reason, and every acceptance criterion.`,
+        });
+        if (fixed) res = fixed;
+        else return;
       }
+      pushVersion(res, target ? `${text.slice(0, 32)} (${countWords(res)}w)` : text.slice(0, 40));
+      setFeedback("");
     } finally {
       setBusy(null);
     }
@@ -721,7 +753,7 @@ export default function Page() {
               ))}
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              {busy === "repair" && <span className="meta">repairing contract…</span>}
+              {busy === "repair" && <span className="meta">auto-fixing…</span>}
               {streamingNow && <span className="meta">{thinking ? `thinking… ${elapsed}s` : `writing… ${elapsed}s`}</span>}
               {shown && <span className="meta">{chainCount > 1 ? `${chainCount} prompts · ` : ""}{words}w</span>}
               {streamingNow && (
@@ -750,7 +782,7 @@ export default function Page() {
               </>
             ) : streamingNow ? (
               <span className="thinking">
-                <span className="caret" /> {busy === "refine" ? "Applying your refinement" : busy === "repair" ? "Repairing missing sections" : "Planning the prompt"} — {elapsed}s
+                <span className="caret" /> {busy === "refine" ? "Applying your refinement" : busy === "repair" ? "Auto-fixing the last result" : "Planning the prompt"} — {elapsed}s
               </span>
             ) : (
               "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
