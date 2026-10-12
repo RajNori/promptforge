@@ -48,6 +48,7 @@ npm run dev
 | `AI_MODEL` | yes | Model id |
 | `ACCESS_CODE` | recommended | When set, the API requires this code (the UI prompts for it) |
 | `AI_EXTRA_BODY` | no | JSON merged into every upstream request for provider-specific params (e.g. reasoning effort) |
+| `AI_FAST_BODY` | no | JSON merged over `AI_EXTRA_BODY` for light calls (analyze, suggest, refine), e.g. reasoning off |
 
 The provider, model and upstream errors stay server-side. The browser only ever talks to `/api/generate`, and clients cannot override the model.
 

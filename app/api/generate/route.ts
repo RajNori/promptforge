@@ -23,6 +23,8 @@ const cfg = () => ({
   model: process.env.AI_MODEL ?? "",
   // Optional provider-specific request params (e.g. reasoning controls), merged into every call. Server-side only.
   extra: parseExtra(process.env.AI_EXTRA_BODY),
+  // Optional overrides for light tasks (analyze / suggest / refine), e.g. reasoning off. Merged over `extra`.
+  fast: parseExtra(process.env.AI_FAST_BODY),
 });
 
 function parseExtra(raw?: string): Record<string, unknown> {
@@ -71,7 +73,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode." });
-  const { url, key, model, extra } = cfg();
+  const { url, key, model, extra: baseExtra, fast } = cfg();
 
   const code = process.env.ACCESS_CODE;
   if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code." });
@@ -99,6 +101,7 @@ export async function POST(req: NextRequest) {
   }
 
   const guidance = targetGuidance(body.brief.target);
+  const extra = body.mode === "generate" ? baseExtra : { ...baseExtra, ...fast };
 
   let messages: { role: string; content: string }[];
   let stream = true;
@@ -173,6 +176,7 @@ export async function POST(req: NextRequest) {
 
   if (!stream) {
     const data = await upstream.json().catch(() => null);
+    if (data?.usage) console.log("[generate] usage", body.mode, JSON.stringify(data.usage));
     const raw: string = data?.choices?.[0]?.message?.content ?? "";
     const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     if (body.mode === "suggest") {
@@ -245,6 +249,7 @@ export async function POST(req: NextRequest) {
                 console.error("[generate] stream error", evt.error);
                 failed = true;
               }
+              if (evt.usage) console.log("[generate] usage", body.mode, JSON.stringify(evt.usage));
               const choice = evt?.choices?.[0];
               const delta = choice?.delta?.content;
               if (delta) controller.enqueue(encoder.encode(delta));
