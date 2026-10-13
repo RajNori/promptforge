@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { PLANS, type PlanId } from "@/lib/plans";
 
-export const metadata: Metadata = { title: "Pricing · Prompt Forge", description: "Free to start. Pro for people who ship prompts daily." };
+export const metadata: Metadata = { title: "Pricing", alternates: { canonical: "/pricing" }, description: "Free to start. Pro for people who ship prompts daily." };
 
 const ORDER: PlanId[] = ["ANON", "FREE", "PRO"];
 

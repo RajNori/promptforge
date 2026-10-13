@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-export const metadata: Metadata = { title: "Terms · Prompt Forge" };
+export const metadata: Metadata = { title: "Terms", alternates: { canonical: "/terms" } };
 
 export default function Terms() {
   return (

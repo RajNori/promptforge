@@ -1,9 +1,17 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { SITE_NAME, SITE_URL } from "@/lib/site";
+
+const description =
+  "Free AI prompt generator: turn a rough idea into a ready-to-paste prompt for ChatGPT, Claude, Gemini or Copilot. Templates for marketers, assistants, students, founders and developers.";
 
 export const metadata: Metadata = {
-  title: "Prompt Forge",
-  description: "One brief, five frameworks: RISEN, CO-STAR, RTF, CRISPE, BAB. Generate and fine-tune production-grade prompts.",
+  metadataBase: new URL(SITE_URL),
+  title: { default: `${SITE_NAME} — AI Prompt Generator for ChatGPT, Claude & Gemini`, template: `%s · ${SITE_NAME}` },
+  description,
+  alternates: { canonical: "/" },
+  openGraph: { type: "website", url: SITE_URL, siteName: SITE_NAME, title: `${SITE_NAME} — AI Prompt Generator`, description },
+  twitter: { card: "summary", title: `${SITE_NAME} — AI Prompt Generator`, description },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
