@@ -84,12 +84,10 @@ export function FieldLabel({
 const GOAL_LABEL = (t: Template) => personaOf(t.persona).goals.find((g) => g.id === t.goal)?.label ?? "More";
 
 /** Persona-aware template picker: your role first (your goals on top), every other role browsable. */
-export function TemplateMenu({ onPick, profile }: { onPick: (t: Template) => void; profile: Profile | null }) {
+export function TemplateMenu({ onPick, profile, onPersona }: { onPick: (t: Template) => void; profile: Profile | null; onPersona: (id: PersonaId) => void }) {
   const [open, setOpen] = useState(false);
-  const [who, setWho] = useState<PersonaId>(profile?.persona ?? "general");
+  const who: PersonaId = profile?.persona ?? "general";
   const root = useRef<HTMLDivElement>(null);
-
-  useEffect(() => setWho(profile?.persona ?? "general"), [profile?.persona]);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => !root.current?.contains(e.target as Node) && setOpen(false);
@@ -102,7 +100,7 @@ export function TemplateMenu({ onPick, profile }: { onPick: (t: Template) => voi
     };
   }, [open]);
 
-  const list = templatesFor(profile && profile.persona === who ? profile : { ...(profile ?? defaultProfile()), persona: who, goals: [] });
+  const list = templatesFor(profile ?? defaultProfile(who));
   const groups: { label: string; items: Template[] }[] = [];
   for (const t of list) {
     const label = GOAL_LABEL(t);
@@ -126,11 +124,10 @@ export function TemplateMenu({ onPick, profile }: { onPick: (t: Template) => voi
       {open && (
         <div className="exm-pop" role="menu">
           <div className="exm-who">
-            <select aria-label="Show templates for" value={who} onChange={(e) => setWho(e.target.value as PersonaId)}>
+            <select aria-label="I'm a" value={who} onChange={(e) => onPersona(e.target.value as PersonaId)}>
               {PERSONAS.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.label}
-                  {p.id === profile?.persona ? " (you)" : ""}
                 </option>
               ))}
             </select>

@@ -28,9 +28,15 @@ export function useProfile(me: Me | null) {
   const [loaded, setLoaded] = useState(false);
   const [skipped, setSkipped] = useState(false);
   const synced = useRef(false);
+  const hydratedFor = useRef<string | null>(null);
 
+  // Hydrate once per identity. /api/me refreshes after every AI call; re-reading it here
+  // would clobber a change the user just made while its PUT is still in flight.
   useEffect(() => {
     if (!me) return;
+    const who = me.user?.email ?? "guest";
+    if (hydratedFor.current === who) return;
+    hydratedFor.current = who;
     const local = readLocal();
     if (me.user && me.profile) setProfile(me.profile);
     else setProfile(local);

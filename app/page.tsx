@@ -26,7 +26,7 @@ import { FieldLabel, Sparkle, StarIcon, TemplateMenu, TemplateStrip } from "./ui
 import { Onboarding } from "./Onboarding";
 import { useProfile } from "./useProfile";
 import { placeholderFor } from "@/lib/placeholders";
-import { PERSONA_TASK, TOOLS, persona as personaOf, targetFor, templateBrief, type Mode, type Profile, type Template } from "@/lib/personas";
+import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
 
 type Stage = "brief" | "clarify" | "forge";
@@ -189,6 +189,15 @@ export default function Page() {
   const ph = (f: Parameters<typeof placeholderFor>[0]) => placeholderFor(f, brief.taskType, profile?.persona);
   const presets = simple || nonDev ? SIMPLE_PRESETS : DEV_PRESETS;
   const toolLabel = profile ? TOOLS.find((t) => t.id === profile.tool)?.label : null;
+
+  /** Switch role: one state change; placeholders, templates, presets and defaults all derive from it. */
+  function changePersona(id: PersonaId) {
+    if (profile?.persona === id) return;
+    const next: Profile = profile ? { ...profile, persona: id, goals: [] } : { ...defaultProfile(id), mode };
+    saveProfile(next);
+    // Untouched brief → follow the role's home task (drives framework + placeholders). Never overwrite user content.
+    if (!brief.objective.trim() && !brief.context.trim()) setBrief((b) => ({ ...b, ...profileDefaults(next) }));
+  }
 
   function finishOnboarding(p: Profile) {
     saveProfile(p);
@@ -516,7 +525,7 @@ export default function Page() {
         </div>
         <div className="top-r">
         <button className="btn ghost sm persona-btn" onClick={() => setObOpen(true)} title="Change your role, goals and tool">
-          {profile ? per.label : "Personalise"}
+          {profile ? per.label.split(" /")[0] : "Personalise"}
         </button>
         <AccountBar me={me} onOpenProject={openProject} onNewProject={newPrompt} />
         <div className="theme" role="radiogroup" aria-label="Theme">
@@ -551,7 +560,7 @@ export default function Page() {
                   </button>
                 ))}
               </div>
-              <TemplateMenu onPick={loadTemplate} profile={profile} />
+              <TemplateMenu onPick={loadTemplate} profile={profile} onPersona={changePersona} />
               <button className="btn ghost sm" onClick={newPrompt} title="Start a new prompt">
                 New
               </button>
@@ -565,14 +574,20 @@ export default function Page() {
               <>
                 {stage === "brief" && !brief.objective.trim() && !brief.context.trim() && <TemplateStrip profile={profile} onPick={loadTemplate} />}
 
-                {simple ? (
+                <div className="row">
+                  <div className="field">
+                    <label>I&apos;m a</label>
+                    <Select ariaLabel="I'm a" value={profile?.persona ?? "general"} onChange={(v) => changePersona(v as PersonaId)} options={PERSONAS.map((p) => ({ value: p.id, label: p.label }))} />
+                  </div>
                   <div className="field">
                     <label>
-                      What kind of task? <em>{toolLabel ? `shaped for ${toolLabel} · ${fw.name}` : fw.name}</em>
+                      {simple ? "What kind of task?" : "Task type"} <em>{simple && toolLabel ? `${toolLabel} · ${fw.name}` : fw.name}</em>
                     </label>
                     <Select ariaLabel="Task type" value={brief.taskType} onChange={(v) => set("taskType", v)} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
                   </div>
-                ) : (
+                </div>
+
+                {!simple && (
                 <>
                 <div className="field">
                   <label>Target</label>
@@ -586,15 +601,9 @@ export default function Page() {
                   </div>
                 </div>
 
-                <div className="row">
-                  <div className="field">
-                    <label>Task type</label>
-                    <Select ariaLabel="Task type" value={brief.taskType} onChange={(v) => set("taskType", v)} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
-                  </div>
-                  <div className="field">
-                    <FieldLabel field="role" label="Role" hint="optional" spark={spark("role")} />
-                    <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} />
-                  </div>
+                <div className="field">
+                  <FieldLabel field="role" label="AI's role" hint="optional" spark={spark("role")} />
+                  <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} />
                 </div>
 
                 <div className="field">
