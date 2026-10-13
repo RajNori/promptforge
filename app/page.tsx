@@ -63,7 +63,18 @@ function briefHasContent(b: Brief): boolean {
 }
 
 /** Blank-brief defaults for a profile. */
-const profileDefaults = (p: Profile | null): Partial<Brief> => (p ? { target: profileTarget(p), taskType: PERSONA_TASK[p.persona] as Brief["taskType"] } : {});
+const profileDefaults = (p: Profile | null): Partial<Brief> => {
+  if (!p) return {};
+  const target = profileTarget(p);
+  const agentic = target !== "chat-llm" && target !== "api-system";
+  return {
+    target,
+    taskType: PERSONA_TASK[p.persona] as Brief["taskType"],
+    // Agent-only sections (authority boundaries, evidence gates, Definition of Done) are noise in chat/app prompts.
+    // Advanced mode can still switch them back on.
+    extensions: agentic ? EMPTY_BRIEF.extensions : { ...EMPTY_BRIEF.extensions, authorityBoundaries: false, evidence: false, definitionOfDone: false },
+  };
+};
 
 /** Default target for a profile: coding agents only for developers. */
 const profileTarget = (p: Profile | null) => {
@@ -176,6 +187,9 @@ export default function Page() {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
+  /** Previous prompt's output kept as read-only reference after New / Start fresh. Session-only; never saved into the new prompt. */
+  const [reference, setReference] = useState<{ text: string; label: string; title: string } | null>(null);
+  const [viewRef, setViewRef] = useState(false);
   type ToastAction = { label: string; run: () => void; primary?: boolean };
   const [toast, setToast] = useState<{ msg: string; actions: ToastAction[] } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -186,6 +200,12 @@ export default function Page() {
   useBriefSync(history.projectId, brief);
   const { profile, save: saveProfile, skip: skipOnboarding, needsOnboarding } = useProfile(me);
   const [obOpen, setObOpen] = useState(false);
+  const defaultsApplied = useRef(false);
+  useEffect(() => {
+    if (!profile || defaultsApplied.current) return;
+    defaultsApplied.current = true;
+    setBrief((b) => (briefHasContent(b) ? b : { ...b, ...profileDefaults(profile) }));
+  }, [profile]);
   const [mode, setModeState] = useState<Mode>("simple");
   useEffect(() => {
     if (profile) setModeState(profile.mode);
@@ -275,8 +295,9 @@ export default function Page() {
   const fw = resolveFramework(brief);
   const autoFw = FRAMEWORKS[autoPick(brief.target, brief.taskType)];
   const current = versions.find((v) => v.id === active) ?? null;
+  const viewingRef = !!reference && viewRef;
   const streamingNow = busy === "generate" || busy === "refine" || busy === "repair";
-  const shown = streamingNow ? streaming : current?.text ?? "";
+  const shown = streamingNow ? streaming : viewingRef ? reference!.text : current?.text ?? "";
   const canAI = server?.configured;
   const ready = brief.objective.trim().length > 8;
   const isApi = brief.target === "api-system";
@@ -308,6 +329,7 @@ export default function Page() {
   /** Save a version (or replace one — auto-fixes overwrite the attempt they fixed). */
   async function pushVersion(text: string, label: string, replaceId?: string) {
     const missing = missingSections(text, brief);
+    setViewRef(false); // new output takes the stage; reference stays one click away
     const id = await history.save(brief, text, label, missing, replaceId);
     return { id, missing };
   }
@@ -416,9 +438,13 @@ export default function Page() {
 
   /** Clear everything for fresh input. Instant, with Undo — no confirm modal (Undo is safer and never nags). */
   function newPrompt(defaults: Partial<Brief> = profileDefaults(profile), msg = "Started a new prompt") {
-    const snap = { brief, analysis, answers, stage, history: history.snapshot() };
+    const snap = { brief, analysis, answers, stage, history: history.snapshot(), reference, viewRef };
     const hadWork = briefHasContent(brief) || snap.history.versions.length > 0;
     abortRef.current?.abort();
+    if (current) {
+      setReference({ text: current.text, label: `v${current.seq} · ${current.label}`, title: cleanText(brief.objective, 80).trim() || "Previous prompt" });
+      setViewRef(true);
+    }
     history.reset();
     setBrief({ ...EMPTY_BRIEF, ...defaults });
     setAnalysis(null);
@@ -439,6 +465,8 @@ export default function Page() {
             setAnalysis(snap.analysis);
             setAnswers(snap.answers);
             setStage(snap.stage);
+            setReference(snap.reference);
+            setViewRef(snap.viewRef);
           },
         },
       ],
@@ -967,10 +995,20 @@ export default function Page() {
         <section className="panel">
           <div className="panel-h">
             <div className="versions">
-              {versions.length === 0 && <span className="note">Output</span>}
+              {reference && (
+                <span className={`ver-wrap ref ${viewingRef ? "on" : ""}`}>
+                  <button className={`ver ref ${viewingRef ? "on" : ""}`} onClick={() => setViewRef(true)} title={`Reference: ${reference.title}`}>
+                    Ref
+                  </button>
+                  <button className="pin" onClick={() => (setReference(null), setViewRef(false))} title="Dismiss reference" aria-label="Dismiss reference">
+                    ×
+                  </button>
+                </span>
+              )}
+              {versions.length === 0 && !reference && <span className="note">Output</span>}
               {versions.map((v) => (
-                <span key={v.id} className={`ver-wrap ${v.id === active ? "on" : ""}`}>
-                  <button className={`ver ${v.id === active ? "on" : ""} ${v.missing.length ? "warn" : ""} ${v.pinned ? "pinned" : ""}`} onClick={() => setActive(v.id)} title={v.label}>
+                <span key={v.id} className={`ver-wrap ${v.id === active && !viewingRef ? "on" : ""}`}>
+                  <button className={`ver ${v.id === active && !viewingRef ? "on" : ""} ${v.missing.length ? "warn" : ""} ${v.pinned ? "pinned" : ""}`} onClick={() => (setActive(v.id), setViewRef(false))} title={v.label}>
                     v{v.seq}
                   </button>
                   <button className={`pin ${v.pinned ? "on" : ""}`} onClick={() => history.togglePin(v.id)} title={v.pinned ? "Unpin (may be removed once 5 newer versions exist)" : "Pin — keep this version"} aria-label={v.pinned ? `Unpin v${v.seq}` : `Pin v${v.seq}`} aria-pressed={v.pinned}>
@@ -998,12 +1036,17 @@ export default function Page() {
               <button className="btn sm" disabled={!shown} onClick={copy}>
                 {copied ? "Copied" : "Copy"}
               </button>
-              <button className="btn sm" disabled={!current || !!busy} onClick={download}>
+              <button className="btn sm" disabled={!current || viewingRef || !!busy} onClick={download}>
                 .md
               </button>
             </div>
           </div>
-          {current && !streamingNow && (
+          {viewingRef && !streamingNow && (
+            <div className="contract ref">
+              Reference from your previous prompt — “{reference!.title}” ({reference!.label}). Read-only; not part of this brief.
+            </div>
+          )}
+          {current && !viewingRef && !streamingNow && (
             <div className={`contract ${current.missing.length ? "bad" : "ok"}`}>
               {current.missing.length ? `Missing ${current.missing.join(", ")} — ask a refinement to restore` : `${current.label} · all required sections present`}
             </div>
@@ -1027,7 +1070,7 @@ export default function Page() {
               )}
             </pre>
           )}
-          {current && canAI && (
+          {current && canAI && !viewingRef && (
             <div className="refine">
               <div className="chips">
                 {presets.map((p) => (
