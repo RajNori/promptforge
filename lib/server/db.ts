@@ -12,7 +12,9 @@ const g = globalThis as unknown as { __prisma?: PrismaClient };
 export function db(): PrismaClient | null {
   if (!hasDb()) return null;
   if (!g.__prisma) {
-    const adapter = new PrismaPg({ connectionString: databaseUrl(), max: 5, idleTimeoutMillis: 10_000 });
+    // pg treats sslmode=require as verify-full today and warns about it; make that explicit (full cert verification).
+    const connectionString = databaseUrl().replace(/sslmode=(prefer|require|verify-ca)\b/, "sslmode=verify-full");
+    const adapter = new PrismaPg({ connectionString, max: 5, idleTimeoutMillis: 10_000 });
     g.__prisma = new PrismaClient({ adapter });
   }
   return g.__prisma;
