@@ -4,11 +4,14 @@ import Google from "next-auth/providers/google";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { db } from "@/lib/server/db";
 
+/** Env credentials are often pasted with stray whitespace or duplicated lines — use the first non-empty trimmed line. */
+const cred = (v?: string) => v?.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? "";
+
 /** Providers are enabled only when their credentials exist, so the app runs before OAuth apps are created. */
 export function enabledProviders() {
   const p: string[] = [];
-  if (process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET) p.push("google");
-  if (process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET) p.push("github");
+  if (cred(process.env.AUTH_GOOGLE_ID) && cred(process.env.AUTH_GOOGLE_SECRET)) p.push("google");
+  if (cred(process.env.AUTH_GITHUB_ID) && cred(process.env.AUTH_GITHUB_SECRET)) p.push("github");
   return p;
 }
 
@@ -17,8 +20,10 @@ export const authEnabled = () => Boolean(db() && process.env.AUTH_SECRET && enab
 export const { handlers, auth, signIn, signOut } = NextAuth(() => {
   const prisma = db();
   const providers: NextAuthConfig["providers"] = [];
-  if (enabledProviders().includes("google")) providers.push(Google);
-  if (enabledProviders().includes("github")) providers.push(GitHub);
+  if (enabledProviders().includes("google"))
+    providers.push(Google({ clientId: cred(process.env.AUTH_GOOGLE_ID), clientSecret: cred(process.env.AUTH_GOOGLE_SECRET) }));
+  if (enabledProviders().includes("github"))
+    providers.push(GitHub({ clientId: cred(process.env.AUTH_GITHUB_ID), clientSecret: cred(process.env.AUTH_GITHUB_SECRET) }));
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     adapter: prisma ? PrismaAdapter(prisma as any) : undefined,
