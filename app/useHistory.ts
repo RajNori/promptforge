@@ -141,6 +141,15 @@ export function useHistory(syncState: boolean | null, onError: (msg: string) => 
     seq.current = 0;
   }, []);
 
+  /** Capture / restore the whole history state (powers Undo after "New"). */
+  const snapshot = useCallback(() => ({ versions, activeId, projectId, seq: seq.current }), [versions, activeId, projectId]);
+  const restore = useCallback((snap: { versions: Version[]; activeId: string | null; projectId: string | null; seq: number }) => {
+    setVersions(snap.versions);
+    setActiveId(snap.activeId);
+    setProjectId(snap.projectId);
+    seq.current = snap.seq;
+  }, []);
+
   /** Load a saved project; returns its brief. */
   const open = useCallback(async (id: string): Promise<Brief | null> => {
     try {
@@ -156,7 +165,7 @@ export function useHistory(syncState: boolean | null, onError: (msg: string) => 
     }
   }, [onError]);
 
-  return { versions, activeId, setActiveId, projectId, save, togglePin, clear, reset, open };
+  return { versions, activeId, setActiveId, projectId, save, togglePin, clear, reset, open, snapshot, restore };
 }
 
 /** Debounced brief sync for an open project. */

@@ -52,6 +52,16 @@ const SIMPLE_PRESETS = [
   "Add a checklist the AI must verify before replying",
 ];
 
+/** Anything the user has typed or picked beyond defaults. */
+function briefHasContent(b: Brief): boolean {
+  const text = [b.objective, b.context, b.role, b.audience, b.tone, b.inputs, b.deliverable, b.successCriteria, b.outputFormat, b.prefill, b.outputSchema];
+  return (
+    text.some((t) => t.trim()) ||
+    b.rules.some((r) => r.rule.trim() || r.why.trim()) ||
+    b.examples.some((e) => e.input.trim() || e.output.trim())
+  );
+}
+
 /** Blank-brief defaults for a profile. */
 const profileDefaults = (p: Profile | null): Partial<Brief> => (p ? { target: profileTarget(p), taskType: PERSONA_TASK[p.persona] as Brief["taskType"] } : {});
 
@@ -166,7 +176,8 @@ export default function Page() {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
-  const [toast, setToast] = useState<{ msg: string; prev?: Brief } | null>(null);
+  type ToastAction = { label: string; run: () => void; primary?: boolean };
+  const [toast, setToast] = useState<{ msg: string; actions: ToastAction[] } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { me, refresh: refreshMe } = useMe();
   const onHistoryError = useCallback((msg: string) => showToast(msg), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -195,8 +206,19 @@ export default function Page() {
     if (profile?.persona === id) return;
     const next: Profile = profile ? { ...profile, persona: id, goals: [] } : { ...defaultProfile(id), mode };
     saveProfile(next);
-    // Untouched brief → follow the role's home task (drives framework + placeholders). Never overwrite user content.
-    if (!brief.objective.trim() && !brief.context.trim()) setBrief((b) => ({ ...b, ...profileDefaults(next) }));
+    const label = personaOf(id).label.split(" /")[0];
+    // Empty brief → silently follow the role's home task (drives framework + placeholders).
+    if (!briefHasContent(brief)) return setBrief((b) => ({ ...b, ...profileDefaults(next) }));
+    // Content → never touch it. Offer a fresh start and flag a task mismatch.
+    const mismatch = brief.taskType !== PERSONA_TASK[id] ? ` (still set to ${brief.taskType})` : "";
+    showToast(
+      `Switched to ${label}. Your current brief is kept${mismatch}.`,
+      [
+        { label: "Start fresh", primary: true, run: () => newPromptRef.current(profileDefaults(next), `Cleared for a fresh ${label} prompt`) },
+        { label: "Keep editing", run: () => setToast(null) },
+      ],
+      15000,
+    );
   }
 
   function finishOnboarding(p: Profile) {
@@ -349,10 +371,12 @@ export default function Page() {
     }
   }
 
-  function showToast(msg: string, prev?: Brief) {
+  /** Toast with optional actions. Passing `prev` adds an Undo that restores the brief. */
+  function showToast(msg: string, prev?: Brief | ToastAction[], ttl = 9000) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ msg, prev });
-    toastTimer.current = setTimeout(() => setToast(null), 9000);
+    const actions = Array.isArray(prev) ? prev : prev ? [{ label: "Undo", run: () => setBrief(prev) }] : [];
+    setToast({ msg, actions });
+    toastTimer.current = setTimeout(() => setToast(null), ttl);
   }
 
   async function suggest(field: SuggestField | "all") {
@@ -386,12 +410,40 @@ export default function Page() {
     showToast(`Loaded template: ${t.name} — edit the details to fit`, brief);
   }
 
-  function newPrompt() {
+  // Toast actions fire seconds later — always call the latest closure so Undo snapshots the current brief.
+  const newPromptRef = useRef<typeof newPrompt>(null as unknown as typeof newPrompt);
+  newPromptRef.current = newPrompt;
+
+  /** Clear everything for fresh input. Instant, with Undo — no confirm modal (Undo is safer and never nags). */
+  function newPrompt(defaults: Partial<Brief> = profileDefaults(profile), msg = "Started a new prompt") {
+    const snap = { brief, analysis, answers, stage, history: history.snapshot() };
+    const hadWork = briefHasContent(brief) || snap.history.versions.length > 0;
+    abortRef.current?.abort();
     history.reset();
-    setBrief({ ...EMPTY_BRIEF, ...profileDefaults(profile) });
+    setBrief({ ...EMPTY_BRIEF, ...defaults });
     setAnalysis(null);
     setAnswers([]);
+    setFeedback("");
+    setError("");
     setStage("brief");
+    if (!hadWork) return;
+    showToast(
+      `${msg}${me?.sync && snap.history.projectId ? " — the previous one is in your Library" : ""}`,
+      [
+        {
+          label: "Undo",
+          primary: true,
+          run: () => {
+            history.restore(snap.history);
+            setBrief(snap.brief);
+            setAnalysis(snap.analysis);
+            setAnswers(snap.answers);
+            setStage(snap.stage);
+          },
+        },
+      ],
+      10000,
+    );
   }
 
   async function openProject(id: string) {
@@ -527,7 +579,7 @@ export default function Page() {
         <button className="btn ghost sm persona-btn" onClick={() => setObOpen(true)} title="Change your role, goals and tool">
           {profile ? per.label.split(" /")[0] : "Personalise"}
         </button>
-        <AccountBar me={me} onOpenProject={openProject} onNewProject={newPrompt} />
+        <AccountBar me={me} onOpenProject={openProject} onNewProject={() => newPrompt()} />
         <div className="theme" role="radiogroup" aria-label="Theme">
           {(["system", "light", "dark"] as const).map((t) => (
             <button key={t} role="radio" aria-checked={theme === t} aria-label={t} title={t[0].toUpperCase() + t.slice(1)} className={theme === t ? "on" : ""} onClick={() => applyTheme(t)}>
@@ -561,7 +613,7 @@ export default function Page() {
                 ))}
               </div>
               <TemplateMenu onPick={loadTemplate} profile={profile} onPersona={changePersona} />
-              <button className="btn ghost sm" onClick={newPrompt} title="Start a new prompt">
+              <button className="btn ghost sm" onClick={() => newPrompt()} title="Start a new prompt">
                 New
               </button>
             </div>
@@ -988,16 +1040,18 @@ export default function Page() {
       {toast && (
         <div className="toast" role="status">
           <span>{toast.msg}</span>
-          {toast.prev && (
+          {toast.actions.map((a) => (
             <button
+              key={a.label}
+              className={a.primary ? "primary" : ""}
               onClick={() => {
-                setBrief(toast.prev!);
                 setToast(null);
+                a.run();
               }}
             >
-              Undo
+              {a.label}
             </button>
-          )}
+          ))}
           <button aria-label="Dismiss" onClick={() => setToast(null)}>
             ×
           </button>
