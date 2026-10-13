@@ -25,6 +25,7 @@ import { LIMITS, cleanText } from "@/lib/sanitize";
 import { FieldLabel, Sparkle, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
 import { Onboarding } from "./Onboarding";
 import { useProfile } from "./useProfile";
+import { placeholderFor } from "@/lib/placeholders";
 import { PERSONA_TASK, TOOLS, persona as personaOf, targetFor, templateBrief, type Mode, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
 
@@ -185,7 +186,7 @@ export default function Page() {
   const simple = mode === "simple";
   const per = personaOf(profile?.persona);
   const nonDev = !!profile && profile.persona !== "developer";
-  const ph = (f: keyof typeof per.placeholders, dev: string) => (nonDev ? per.placeholders[f] ?? dev : dev);
+  const ph = (f: Parameters<typeof placeholderFor>[0]) => placeholderFor(f, brief.taskType, profile?.persona);
   const presets = simple || nonDev ? SIMPLE_PRESETS : DEV_PRESETS;
   const toolLabel = profile ? TOOLS.find((t) => t.id === profile.tool)?.label : null;
 
@@ -592,7 +593,7 @@ export default function Page() {
                   </div>
                   <div className="field">
                     <FieldLabel field="role" label="Role" hint="optional" spark={spark("role")} />
-                    <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder="Principal engineer, Next.js + Supabase" />
+                    <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} />
                   </div>
                 </div>
 
@@ -622,28 +623,28 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
-                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective", "Implement…, migrate…, write…, analyse…")} />
+                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective")} />
                 </div>
 
                 <div className="field">
                   <FieldLabel
                     field="context"
                     label={fw.id === "bab" ? "Before — current state" : "Context"}
-                    hint={fw.id === "bab" ? "what exists today, what's wrong" : nonDev || simple ? "background, situation, details" : "stack, background, situation"}
+                    hint={fw.id === "bab" ? "what exists today, what's wrong" : ph("contextHint")}
                     spark={spark("context")}
                   />
-                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context", "Next.js 16, TypeScript, Supabase RLS, Vercel…")} />
+                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} />
                 </div>
 
                 {(simple || fw.usesAudienceTone || brief.audience || brief.tone) && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
-                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience", "Technical founders evaluating vendors")} />
+                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience")} />
                     </div>
                     <div className="field">
                       <FieldLabel field="tone" label="Tone" hint={simple ? "how it should sound" : fw.name} spark={spark("tone")} />
-                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone", "Direct, credible, zero hype")} />
+                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone")} />
                     </div>
                   </div>
                 )}
@@ -651,11 +652,11 @@ export default function Page() {
                 <div className="row">
                   <div className="field">
                     <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
-                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable", "PR-ready feature, article, spec…")} />
+                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable")} />
                   </div>
                   <div className="field">
                     <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
-                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria", nonDev ? "Under 200 words, clear call to action" : "Tests pass, p95 < 200ms…")} />
+                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria")} />
                   </div>
                 </div>
 
@@ -664,9 +665,9 @@ export default function Page() {
                   <div className="rules">
                     {brief.rules.map((r, i) => (
                       <div className="rule" key={i}>
-                        <input type="text" value={r.rule} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder={nonDev ? "No jargon" : "No new dependencies"} aria-label={`Rule ${i + 1}`} />
+                        <input type="text" value={r.rule} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder={ph("rule")} aria-label={`Rule ${i + 1}`} />
                         <span className="because">because</span>
-                        <input type="text" value={r.why} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { why: e.target.value })} placeholder={nonDev ? "readers are non-experts (optional)" : "bundle budget (optional)"} aria-label={`Reason for rule ${i + 1}`} />
+                        <input type="text" value={r.why} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { why: e.target.value })} placeholder={ph("why")} aria-label={`Reason for rule ${i + 1}`} />
                         <button
                           className="icon-btn"
                           aria-label="Remove rule"
@@ -752,11 +753,11 @@ export default function Page() {
                   <div className="row">
                     <div className="field">
                       <FieldLabel field="inputs" label="Inputs / assets" spark={spark("inputs")} />
-                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder="Files, docs, keys, data available" />
+                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder={ph("inputs")} />
                     </div>
                     <div className="field">
                       <FieldLabel field="outputFormat" label="Response format" spark={spark("outputFormat")} />
-                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder="Final report shape, length, structure" />
+                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder={ph("outputFormat")} />
                     </div>
                   </div>
                   <div className="row">
