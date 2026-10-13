@@ -180,3 +180,55 @@ export function TemplateStrip({ profile, onPick }: { profile: Profile | null; on
     </div>
   );
 }
+
+/** Tiny inline spinner for buttons; inherits text colour. */
+export function Spinner({ label }: { label?: string }) {
+  return <span className="spinner" role={label ? "status" : undefined} aria-label={label} aria-hidden={label ? undefined : true} />;
+}
+
+const STAGES: Record<"generate" | "refine" | "repair", string[]> = {
+  generate: ["Reading your brief", "Choosing the structure", "Planning each section", "Writing rules and reasons", "Checking the contract", "Polishing the final prompt"],
+  refine: ["Reading your feedback", "Mapping the changes", "Rewriting affected sections", "Checking nothing was lost"],
+  repair: ["Checking required sections", "Restoring what's missing", "Re-validating the structure"],
+};
+
+/**
+ * Thinking-phase loader: orbiting gradient ring around a pulsing spark, staged status
+ * and elapsed time. Stage advances from elapsed seconds (no extra timers); the last
+ * stage holds until the first token arrives.
+ */
+export function ForgeLoader({ kind, elapsed, framework }: { kind: keyof typeof STAGES; elapsed: number; framework: string }) {
+  const stages = STAGES[kind];
+  const i = Math.min(Math.floor(elapsed / 2.5), stages.length - 1);
+  return (
+    <div className="forge-loader" role="status" aria-live="polite">
+      <div className="fl-orb" aria-hidden>
+        <svg viewBox="0 0 64 64" className="fl-ring">
+          <defs>
+            <linearGradient id="flg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stopColor="var(--accent)" stopOpacity="0" />
+              <stop offset="1" stopColor="var(--accent)" />
+            </linearGradient>
+          </defs>
+          <circle cx="32" cy="32" r="27" className="fl-track" />
+          <circle cx="32" cy="32" r="27" className="fl-arc" stroke="url(#flg)" />
+        </svg>
+        <span className="fl-spark">{STAR}</span>
+      </div>
+      <div className="fl-text">
+        <b key={i} className="fl-stage">
+          {stages[i]}
+          <span className="fl-dots" />
+        </b>
+        <small>
+          {kind === "generate" ? `Forging ${framework}` : kind === "refine" ? "Refining" : "Auto-fixing"} · {elapsed}s
+        </small>
+      </div>
+      <ol className="fl-steps" aria-hidden>
+        {stages.map((s, j) => (
+          <li key={s} className={j < i ? "done" : j === i ? "on" : ""} />
+        ))}
+      </ol>
+    </div>
+  );
+}

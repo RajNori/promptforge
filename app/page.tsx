@@ -22,7 +22,7 @@ import { Select } from "./Select";
 import { AccountBar, useMe } from "./Account";
 import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
-import { FieldLabel, Sparkle, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
 import { Onboarding } from "./Onboarding";
 import { useProfile } from "./useProfile";
 import { placeholderFor } from "@/lib/placeholders";
@@ -881,7 +881,15 @@ export default function Page() {
 
                 <div className="actions">
                   <button className="btn primary" disabled={!ready || !!busy} onClick={analyze}>
-                    {busy === "analyze" ? "Analysing brief…" : canAI ? "Analyse & ask questions →" : "Generate →"}
+                    {busy === "analyze" ? (
+                      <>
+                        <Spinner /> Analysing brief…
+                      </>
+                    ) : canAI ? (
+                      "Analyse & ask questions →"
+                    ) : (
+                      "Generate →"
+                    )}
                   </button>
                   {canAI && (
                     <button className="btn" disabled={!ready || !!busy} onClick={() => generate([])}>
@@ -939,7 +947,13 @@ export default function Page() {
                 ))}
                 <div className="actions">
                   <button className="btn primary" disabled={!!busy} onClick={() => generate()}>
-                    {busy === "generate" ? "Forging…" : `Forge ${fw.name}${brief.chain ? " chain" : ""} →`}
+                    {busy === "generate" ? (
+                      <>
+                        <Spinner /> Forging…
+                      </>
+                    ) : (
+                      `Forge ${fw.name}${brief.chain ? " chain" : ""} →`
+                    )}
                   </button>
                   <button className="btn ghost" onClick={() => setStage("brief")}>
                     ← Edit brief
@@ -974,7 +988,7 @@ export default function Page() {
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {busy === "repair" && <span className="meta">auto-fixing…</span>}
-              {streamingNow && <span className="meta">{thinking ? `thinking… ${elapsed}s` : `writing… ${elapsed}s`}</span>}
+              {streamingNow && !thinking && <span className="meta">writing… {elapsed}s</span>}
               {shown && <span className="meta">{chainCount > 1 ? `${chainCount} prompts · ` : ""}{words}w</span>}
               {streamingNow && (
                 <button className="btn sm" onClick={() => abortRef.current?.abort()}>
@@ -994,22 +1008,25 @@ export default function Page() {
               {current.missing.length ? `Missing ${current.missing.join(", ")} — ask a refinement to restore` : `${current.label} · all required sections present`}
             </div>
           )}
-          <pre className={`out ${shown ? "" : "empty"}`}>
-            {shown ? (
-              <>
-                {highlight(shown)}
-                {streamingNow && <span className="caret" />}
-              </>
-            ) : streamingNow ? (
-              <span className="thinking">
-                <span className="caret" /> {busy === "refine" ? "Applying your refinement" : busy === "repair" ? "Auto-fixing the last result" : "Planning the prompt"} — {elapsed}s
-              </span>
-            ) : (
-              simple
-                ? "Describe what you need (or pick a template) → answer a few quick questions → get a prompt that's ready to paste.\nThen tweak it in plain English."
-                : "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
-            )}
-          </pre>
+          {streamingNow && streaming && <div className="gen-bar" aria-hidden />}
+          {thinking ? (
+            <div className="out empty">
+              <ForgeLoader kind={busy === "refine" ? "refine" : busy === "repair" ? "repair" : "generate"} elapsed={elapsed} framework={fw.name} />
+            </div>
+          ) : (
+            <pre className={`out ${shown ? "" : "empty"}`}>
+              {shown ? (
+                <>
+                  {highlight(shown)}
+                  {streamingNow && <span className="caret" />}
+                </>
+              ) : simple ? (
+                "Describe what you need (or pick a template) → answer a few quick questions → get a prompt that's ready to paste.\nThen tweak it in plain English."
+              ) : (
+                "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
+              )}
+            </pre>
+          )}
           {current && canAI && (
             <div className="refine">
               <div className="chips">
@@ -1030,7 +1047,7 @@ export default function Page() {
                   placeholder="Fine-tune: e.g. 'target Python/FastAPI instead', 'add rollback plan' (⌘↵)"
                 />
                 <button className="btn primary" disabled={!feedback.trim() || !!busy} onClick={() => refine()}>
-                  {busy === "refine" ? "…" : "Refine"}
+                  {busy === "refine" || busy === "repair" ? <Spinner label="Refining" /> : "Refine"}
                 </button>
               </div>
             </div>
