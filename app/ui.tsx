@@ -2,8 +2,8 @@
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { FIELD_HELP, type FieldHelp } from "@/lib/help";
-import { EXAMPLES, type ExampleBrief } from "@/lib/examples";
-import { FRAMEWORKS, TARGETS, TASK_TYPES, autoPick } from "@/lib/forge";
+import { FRAMEWORKS, TARGETS, autoPick } from "@/lib/forge";
+import { PERSONAS, defaultProfile, persona as personaOf, templatesFor, type PersonaId, type Profile, type Template } from "@/lib/personas";
 
 /** Hover/focus tooltip with guidance, a good example, and what to avoid. */
 export function Tip({ help }: { help: FieldHelp }) {
@@ -81,11 +81,15 @@ export function FieldLabel({
   );
 }
 
-/** Grouped example picker. */
-export function ExampleMenu({ onPick, currentType }: { onPick: (ex: ExampleBrief) => void; currentType: string }) {
+const GOAL_LABEL = (t: Template) => personaOf(t.persona).goals.find((g) => g.id === t.goal)?.label ?? "More";
+
+/** Persona-aware template picker: your role first (your goals on top), every other role browsable. */
+export function TemplateMenu({ onPick, profile }: { onPick: (t: Template) => void; profile: Profile | null }) {
   const [open, setOpen] = useState(false);
+  const [who, setWho] = useState<PersonaId>(profile?.persona ?? "general");
   const root = useRef<HTMLDivElement>(null);
 
+  useEffect(() => setWho(profile?.persona ?? "general"), [profile?.persona]);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => !root.current?.contains(e.target as Node) && setOpen(false);
@@ -98,39 +102,54 @@ export function ExampleMenu({ onPick, currentType }: { onPick: (ex: ExampleBrief
     };
   }, [open]);
 
-  // Current task type first, then the rest in canonical order.
-  const order = [currentType, ...TASK_TYPES.filter((t) => t !== currentType)];
-  const groups = order.map((t) => ({ type: t, items: EXAMPLES.filter((e) => e.brief.taskType === t) })).filter((g) => g.items.length);
-
-  const pick = (ex: ExampleBrief) => {
-    onPick(ex);
+  const list = templatesFor(profile && profile.persona === who ? profile : { ...(profile ?? defaultProfile()), persona: who, goals: [] });
+  const groups: { label: string; items: Template[] }[] = [];
+  for (const t of list) {
+    const label = GOAL_LABEL(t);
+    const g = groups.find((x) => x.label === label);
+    if (g) g.items.push(t);
+    else groups.push({ label, items: [t] });
+  }
+  const pick = (t: Template) => {
+    onPick(t);
     setOpen(false);
   };
 
   return (
     <div className="exm" ref={root}>
       <button className="btn ghost sm" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        Examples
+        Templates
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="chev">
           <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {open && (
         <div className="exm-pop" role="menu">
-          <button className="exm-random" role="menuitem" onClick={() => pick(EXAMPLES[Math.floor(Math.random() * EXAMPLES.length)])}>
+          <div className="exm-who">
+            <select aria-label="Show templates for" value={who} onChange={(e) => setWho(e.target.value as PersonaId)}>
+              {PERSONAS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                  {p.id === profile?.persona ? " (you)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button className="exm-random" role="menuitem" onClick={() => list.length && pick(list[Math.floor(Math.random() * list.length)])}>
             {STAR} Surprise me
           </button>
           {groups.map((g) => (
-            <div key={g.type} className="exm-group">
-              <div className="exm-h">{g.type}</div>
-              {g.items.map((ex) => {
-                const fw = FRAMEWORKS[ex.brief.framework && ex.brief.framework !== "auto" ? ex.brief.framework : autoPick(ex.brief.target, ex.brief.taskType)];
+            <div key={g.label} className="exm-group">
+              <div className="exm-h">{g.label}</div>
+              {g.items.map((t) => {
+                const fw = FRAMEWORKS[t.brief.framework && t.brief.framework !== "auto" ? t.brief.framework : autoPick(t.brief.target ?? "chat-llm", t.brief.taskType)];
                 return (
-                  <button key={ex.id} role="menuitem" className="exm-item" onClick={() => pick(ex)}>
-                    <span>{ex.name}</span>
+                  <button key={t.id} role="menuitem" className="exm-item" onClick={() => pick(t)}>
+                    <span>{t.name}</span>
                     <small>
-                      {TARGETS.find((t) => t.id === ex.brief.target)?.label} · {fw.name}
-                      {ex.brief.chain ? " · chain" : ""}
+                      {t.persona === "developer" ? `${TARGETS.find((x) => x.id === t.brief.target)?.label} · ` : ""}
+                      {fw.name}
+                      {t.brief.chain ? " · chain" : ""}
                     </small>
                   </button>
                 );
@@ -139,6 +158,28 @@ export function ExampleMenu({ onPick, currentType }: { onPick: (ex: ExampleBrief
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Empty-state starter cards. */
+export function TemplateStrip({ profile, onPick }: { profile: Profile | null; onPick: (t: Template) => void }) {
+  const items = templatesFor(profile).slice(0, 6);
+  if (!items.length) return null;
+  return (
+    <div className="tstrip">
+      <div className="tstrip-h">
+        <b>Start from a template</b>
+        <small>{profile ? `Picked for ${personaOf(profile.persona).label.toLowerCase()}s` : "Popular starting points"} — or write your own below</small>
+      </div>
+      <div className="tstrip-grid">
+        {items.map((t) => (
+          <button key={t.id} className="tcard" onClick={() => onPick(t)}>
+            <span>{t.name}</span>
+            <small>{GOAL_LABEL(t)}</small>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

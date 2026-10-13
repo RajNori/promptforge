@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { doSignOut } from "./actions";
+import type { Profile } from "@/lib/personas";
 
 export type Me = {
   user: { name: string | null; email: string | null; image: string | null } | null;
@@ -10,6 +11,7 @@ export type Me = {
   period: "day" | "month";
   usage: { used: number; limit: number; resetsAt: string | null; metered: boolean };
   sync: boolean;
+  profile: Profile | null;
   auth: { enabled: boolean; providers: string[] };
 };
 

@@ -16,6 +16,7 @@ export async function GET(req: Request) {
       planName: PLANS[v.plan].name,
       period: PLANS[v.plan].period,
       usage,
+      profile: v.profile,
       sync: Boolean(v.userId && hasDb()),
       auth: { enabled: authEnabled(), providers: enabledProviders() },
     },

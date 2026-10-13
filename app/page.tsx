@@ -22,14 +22,16 @@ import { Select } from "./Select";
 import { AccountBar, useMe } from "./Account";
 import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
-import { ExampleMenu, FieldLabel, Sparkle, StarIcon } from "./ui";
-import { exampleBrief, type ExampleBrief } from "@/lib/examples";
+import { FieldLabel, Sparkle, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { Onboarding } from "./Onboarding";
+import { useProfile } from "./useProfile";
+import { PERSONA_TASK, TOOLS, persona as personaOf, targetFor, templateBrief, type Mode, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
 
 type Stage = "brief" | "clarify" | "forge";
 type Theme = "system" | "light" | "dark";
 
-const REFINE_PRESETS = [
+const DEV_PRESETS = [
   "Make it tighter — cut 30% without losing rules",
   "Add stronger guardrails for destructive actions",
   "Add concrete acceptance criteria",
@@ -39,6 +41,25 @@ const REFINE_PRESETS = [
   "Add a test-first (TDD) workflow",
   "Add an independent reviewer pass",
 ];
+const SIMPLE_PRESETS = [
+  "Make it tighter — cut 30%",
+  "Ask me clarifying questions before answering",
+  "Make the tone warmer and more human",
+  "Make it more formal",
+  "Add a good/bad example of the output",
+  "Give me 3 variations to choose from",
+  "Add a checklist the AI must verify before replying",
+];
+
+/** Blank-brief defaults for a profile. */
+const profileDefaults = (p: Profile | null): Partial<Brief> => (p ? { target: profileTarget(p), taskType: PERSONA_TASK[p.persona] as Brief["taskType"] } : {});
+
+/** Default target for a profile: coding agents only for developers. */
+const profileTarget = (p: Profile | null) => {
+  if (!p) return EMPTY_BRIEF.target;
+  const t = targetFor(p.tool);
+  return t === "claude-code" && p.persona !== "developer" ? "chat-llm" : t;
+};
 
 
 const THEME_ICONS = {
@@ -151,6 +172,29 @@ export default function Page() {
   const history = useHistory(me ? me.sync : null, onHistoryError);
   const { versions, activeId: active, setActiveId: setActive } = history;
   useBriefSync(history.projectId, brief);
+  const { profile, save: saveProfile, skip: skipOnboarding, needsOnboarding } = useProfile(me);
+  const [obOpen, setObOpen] = useState(false);
+  const [mode, setModeState] = useState<Mode>("simple");
+  useEffect(() => {
+    if (profile) setModeState(profile.mode);
+  }, [profile]);
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    if (profile) saveProfile({ ...profile, mode: m });
+  };
+  const simple = mode === "simple";
+  const per = personaOf(profile?.persona);
+  const nonDev = !!profile && profile.persona !== "developer";
+  const ph = (f: keyof typeof per.placeholders, dev: string) => (nonDev ? per.placeholders[f] ?? dev : dev);
+  const presets = simple || nonDev ? SIMPLE_PRESETS : DEV_PRESETS;
+  const toolLabel = profile ? TOOLS.find((t) => t.id === profile.tool)?.label : null;
+
+  function finishOnboarding(p: Profile) {
+    saveProfile(p);
+    setModeState(p.mode);
+    setObOpen(false);
+    if (!brief.objective.trim()) setBrief((b) => ({ ...b, ...profileDefaults(p) }));
+  }
 
   useEffect(() => {
     fetch("/api/generate")
@@ -324,17 +368,17 @@ export default function Page() {
     }
   }
 
-  function loadExample(ex: ExampleBrief) {
-    setBrief(exampleBrief(ex));
+  function loadTemplate(t: Template) {
+    setBrief(templateBrief(t, profile));
     setAnalysis(null);
     setAnswers([]);
     setStage("brief");
-    showToast(`Loaded example: ${ex.name}`, brief);
+    showToast(`Loaded template: ${t.name} — edit the details to fit`, brief);
   }
 
   function newPrompt() {
     history.reset();
-    setBrief(EMPTY_BRIEF);
+    setBrief({ ...EMPTY_BRIEF, ...profileDefaults(profile) });
     setAnalysis(null);
     setAnswers([]);
     setStage("brief");
@@ -467,9 +511,12 @@ export default function Page() {
           <h1>
             <b>Prompt</b> Forge
           </h1>
-          <span>One brief → RISEN · CO-STAR · RTF · CRISPE · BAB</span>
+          <span>{simple ? "Turn a rough idea into a pro-grade AI prompt" : "One brief → RISEN · CO-STAR · RTF · CRISPE · BAB"}</span>
         </div>
         <div className="top-r">
+        <button className="btn ghost sm persona-btn" onClick={() => setObOpen(true)} title="Change your role, goals and tool">
+          {profile ? per.label : "Personalise"}
+        </button>
         <AccountBar me={me} onOpenProject={openProject} onNewProject={newPrompt} />
         <div className="theme" role="radiogroup" aria-label="Theme">
           {(["system", "light", "dark"] as const).map((t) => (
@@ -496,7 +543,14 @@ export default function Page() {
               </button>
             </nav>
             <div style={{ display: "flex", gap: 6 }}>
-              <ExampleMenu onPick={loadExample} currentType={brief.taskType} />
+              <div className="seg mode" role="radiogroup" aria-label="Mode">
+                {(["simple", "advanced"] as const).map((m) => (
+                  <button key={m} role="radio" aria-checked={mode === m} className={mode === m ? "on" : ""} onClick={() => setMode(m)} title={m === "simple" ? "Just the essentials" : "Every control: target, framework, autonomy, chain, few-shot"}>
+                    {m === "simple" ? "Simple" : "Advanced"}
+                  </button>
+                ))}
+              </div>
+              <TemplateMenu onPick={loadTemplate} profile={profile} />
               <button className="btn ghost sm" onClick={newPrompt} title="Start a new prompt">
                 New
               </button>
@@ -508,6 +562,17 @@ export default function Page() {
 
             {stage !== "clarify" && (
               <>
+                {stage === "brief" && !brief.objective.trim() && !brief.context.trim() && <TemplateStrip profile={profile} onPick={loadTemplate} />}
+
+                {simple ? (
+                  <div className="field">
+                    <label>
+                      What kind of task? <em>{toolLabel ? `shaped for ${toolLabel} · ${fw.name}` : fw.name}</em>
+                    </label>
+                    <Select ariaLabel="Task type" value={brief.taskType} onChange={(v) => set("taskType", v)} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
+                  </div>
+                ) : (
+                <>
                 <div className="field">
                   <label>Target</label>
                   <div className="chips">
@@ -552,31 +617,33 @@ export default function Page() {
                     <b>{fw.name}</b> — {fw.tagline.toLowerCase()}.
                   </p>
                 </div>
+                </>
+                )}
 
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
-                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder="Implement…, migrate…, write…, analyse…" />
+                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective", "Implement…, migrate…, write…, analyse…")} />
                 </div>
 
                 <div className="field">
                   <FieldLabel
                     field="context"
                     label={fw.id === "bab" ? "Before — current state" : "Context"}
-                    hint={fw.id === "bab" ? "what exists today, what's wrong" : "stack, background, situation"}
+                    hint={fw.id === "bab" ? "what exists today, what's wrong" : nonDev || simple ? "background, situation, details" : "stack, background, situation"}
                     spark={spark("context")}
                   />
-                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder="Next.js 16, TypeScript, Supabase RLS, Vercel…" />
+                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context", "Next.js 16, TypeScript, Supabase RLS, Vercel…")} />
                 </div>
 
-                {fw.usesAudienceTone && (
+                {(simple || fw.usesAudienceTone || brief.audience || brief.tone) && (
                   <div className="row reveal">
                     <div className="field">
-                      <FieldLabel field="audience" label="Audience" hint={fw.name} spark={spark("audience")} />
-                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder="Technical founders evaluating vendors" />
+                      <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
+                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience", "Technical founders evaluating vendors")} />
                     </div>
                     <div className="field">
-                      <FieldLabel field="tone" label="Tone" hint={fw.name} spark={spark("tone")} />
-                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder="Direct, credible, zero hype" />
+                      <FieldLabel field="tone" label="Tone" hint={simple ? "how it should sound" : fw.name} spark={spark("tone")} />
+                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone", "Direct, credible, zero hype")} />
                     </div>
                   </div>
                 )}
@@ -584,22 +651,22 @@ export default function Page() {
                 <div className="row">
                   <div className="field">
                     <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
-                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder="PR-ready feature, article, spec…" />
+                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable", "PR-ready feature, article, spec…")} />
                   </div>
                   <div className="field">
                     <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
-                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder="Tests pass, p95 < 200ms…" />
+                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria", nonDev ? "Under 200 words, clear call to action" : "Tests pass, p95 < 200ms…")} />
                   </div>
                 </div>
 
                 <div className="field">
-                  <FieldLabel field="rules" label="Rules" hint="the why makes models follow them" spark={spark("rules")} />
+                  <FieldLabel field="rules" label={simple ? "Must-dos & don'ts" : "Rules"} hint="the why makes models follow them" spark={spark("rules")} />
                   <div className="rules">
                     {brief.rules.map((r, i) => (
                       <div className="rule" key={i}>
-                        <input type="text" value={r.rule} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder="No new dependencies" aria-label={`Rule ${i + 1}`} />
+                        <input type="text" value={r.rule} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder={nonDev ? "No jargon" : "No new dependencies"} aria-label={`Rule ${i + 1}`} />
                         <span className="because">because</span>
-                        <input type="text" value={r.why} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { why: e.target.value })} placeholder="bundle budget (optional)" aria-label={`Reason for rule ${i + 1}`} />
+                        <input type="text" value={r.why} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { why: e.target.value })} placeholder={nonDev ? "readers are non-experts (optional)" : "bundle budget (optional)"} aria-label={`Reason for rule ${i + 1}`} />
                         <button
                           className="icon-btn"
                           aria-label="Remove rule"
@@ -628,6 +695,8 @@ export default function Page() {
                   </div>
                 )}
 
+                {!simple && (
+                <>
                 <div className="row">
                   <div className="field">
                     <label>Autonomy</label>
@@ -739,6 +808,14 @@ export default function Page() {
                     </div>
                   )}
                 </details>
+                </>
+                )}
+                {simple && server?.requiresAccessCode && (
+                  <div className="field">
+                    <label>Access code</label>
+                    <input type="text" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} placeholder="Required" />
+                  </div>
+                )}
 
                 <div className="actions">
                   <button className="btn primary" disabled={!ready || !!busy} onClick={analyze}>
@@ -750,7 +827,7 @@ export default function Page() {
                     </button>
                   )}
                   <button className="btn ghost" disabled={!ready || !!busy} onClick={() => instant()}>
-                    Instant template
+                    {simple ? "Quick draft (no AI)" : "Instant template"}
                   </button>
                   {canAI && (
                     <button
@@ -866,13 +943,15 @@ export default function Page() {
                 <span className="caret" /> {busy === "refine" ? "Applying your refinement" : busy === "repair" ? "Auto-fixing the last result" : "Planning the prompt"} — {elapsed}s
               </span>
             ) : (
-              "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
+              simple
+                ? "Describe what you need (or pick a template) → answer a few quick questions → get a prompt that's ready to paste.\nThen tweak it in plain English."
+                : "Fill the brief → answer the gap questions → get a framework-structured prompt.\nThen fine-tune it with plain-English feedback."
             )}
           </pre>
           {current && canAI && (
             <div className="refine">
               <div className="chips">
-                {REFINE_PRESETS.map((p) => (
+                {presets.map((p) => (
                   <button key={p} className="chip" disabled={!!busy} onClick={() => refine(p)}>
                     {p}
                   </button>
@@ -914,7 +993,17 @@ export default function Page() {
           </button>
         </div>
       )}
-      <p className="foot">Brief is saved locally in your browser. Prompts are generated server-side; nothing is stored.</p>
+      {(obOpen || needsOnboarding) && (
+        <Onboarding
+          initial={profile}
+          onDone={finishOnboarding}
+          onSkip={() => {
+            setObOpen(false);
+            skipOnboarding();
+          }}
+        />
+      )}
+      <p className="foot">{me?.sync ? "Your prompts and versions sync to your Library." : "Your draft and versions are saved in this browser. Sign in to sync them."}</p>
     </div>
   );
 }

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { auth } from "@/auth";
 import { db } from "./db";
 import { PLANS, type PlanId } from "@/lib/plans";
+import { parseProfile } from "@/lib/profile";
+import type { Profile } from "@/lib/personas";
 
 export type Viewer = {
   /** Metering key: user id, or a salted hash of the IP for guests. */
@@ -12,6 +14,7 @@ export type Viewer = {
   email: string | null;
   name: string | null;
   image: string | null;
+  profile: Profile | null;
 };
 
 const adminEmails = () =>
@@ -36,17 +39,17 @@ export async function getViewer(req: Request): Promise<Viewer> {
       const session = await auth();
       const id = session?.user?.id;
       if (id) {
-        const u = await prisma.user.findUnique({ where: { id }, select: { id: true, plan: true, email: true, name: true, image: true } });
+        const u = await prisma.user.findUnique({ where: { id }, select: { id: true, plan: true, email: true, name: true, image: true, profile: true } });
         if (u) {
           const isAdmin = !!u.email && adminEmails().includes(u.email.toLowerCase());
-          return { subject: `u:${u.id}`, userId: u.id, plan: isAdmin ? "PRO" : u.plan, email: u.email, name: u.name, image: u.image };
+          return { subject: `u:${u.id}`, userId: u.id, plan: isAdmin ? "PRO" : u.plan, email: u.email, name: u.name, image: u.image, profile: parseProfile(u.profile) };
         }
       }
     } catch (e) {
       console.error("[account] session lookup failed", e);
     }
   }
-  return { subject: hashIp(clientIp(req)), userId: null, plan: "ANON", email: null, name: null, image: null };
+  return { subject: hashIp(clientIp(req)), userId: null, plan: "ANON", email: null, name: null, image: null, profile: null };
 }
 
 export function periodStart(plan: PlanId, now = new Date()): Date {

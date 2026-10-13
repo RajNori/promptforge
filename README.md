@@ -7,6 +7,10 @@ The model analyses the brief, asks targeted gap questions, generates against a h
 
 ## Features
 
+- **Personalised onboarding.** First visit asks role (11 personas), goals, which AI tool you use and experience level. Profile is stored on the account (or in the browser for guests) and re-openable from the header.
+- **Simple / Advanced modes.** Simple shows just the essentials in plain language; Advanced exposes target, framework, autonomy, chain, few-shot and extensions. Defaults from the profile.
+- **Role template library.** 60 ready-made briefs (marketing campaigns and ads, EA emails and minutes, study plans, investor updates, sales sequences, lesson plans, job ads, research synthesis, engineering tasks…), your goals first, every role browsable.
+
 - **Framework registry with auto-pick.** Inferred from task type and target (Writing → CO-STAR, Strategy → CRISPE, chat refactor → BAB, chat research/data → RTF, else RISEN). Can be overridden.
 - **Clarify step.** The model scores brief completeness and asks up to 4 high-leverage questions.
 - **Rules with reasons.** Each constraint carries a "because…", which models follow far more reliably than bare rules.
@@ -46,12 +50,14 @@ Next.js 16 (App Router) · React 19 · TypeScript · Prisma 7 · Auth.js v5 · Z
 ```
 app/
   page.tsx                     # brief → clarify → forge/refine
+  Onboarding.tsx, useProfile.ts # role/goals/tool/level setup
   Account.tsx, useHistory.ts   # account bar, library, versions
   api/generate/route.ts        # analyze | generate | refine | suggest (guarded, metered, streamed)
-  api/me, api/projects/**      # account + saved prompts/versions
+  api/me, api/profile, api/projects/**  # account, profile, saved prompts/versions
   pricing, signin, terms, privacy
 lib/
   forge.ts                     # frameworks, contracts, validator, offline compiler
+  personas.ts, profile.ts      # personas, templates, profile schema
   server/{db,account,guard,metering,projects}.ts
 prisma/schema.prisma           # User/Account/Session, Project, Version, UsageEvent
 ```

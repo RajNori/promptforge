@@ -78,6 +78,10 @@ export const TASK_TYPES = [
   "Writing / content",
   "Data / reporting",
   "Product / strategy",
+  "Email / message",
+  "Marketing & ads",
+  "Study & learning",
+  "Planning & admin",
   "Other",
 ] as const;
 
@@ -232,7 +236,10 @@ const AGENTIC: Target[] = ["claude-code", "cursor", "codex", "multi-agent"];
 export const isAgentic = (t: Target) => AGENTIC.includes(t);
 
 export function autoPick(target: Target, taskType: string): FrameworkId {
-  if (taskType === "Writing / content") return "costar";
+  // Audience- and voice-driven work → CO-STAR.
+  if (taskType === "Writing / content" || taskType === "Email / message" || taskType === "Marketing & ads") return "costar";
+  if (taskType === "Study & learning") return "rtf";
+  if (taskType === "Planning & admin") return "risen";
   if (taskType === "Product / strategy") return "crispe";
   if (taskType === "Refactor / migrate") return isAgentic(target) ? "risen" : "bab";
   if (taskType === "Research & analysis" || taskType === "Data / reporting" || taskType === "Other")
@@ -296,8 +303,8 @@ export function briefToText(b: Brief, clarifications: Clarification[] = []): str
     `DELIVERABLE: ${b.deliverable || "(infer)"}`,
     `SUCCESS CRITERIA: ${b.successCriteria || "(infer measurable criteria)"}`,
     `RULES (with reasons):\n${rulesText(b) || "(infer sensible guardrails)"}`,
-    fw.usesAudienceTone ? `AUDIENCE: ${b.audience || "(infer)"}` : "",
-    fw.usesAudienceTone ? `TONE: ${b.tone || "(infer)"}` : "",
+    fw.usesAudienceTone || b.audience.trim() ? `AUDIENCE: ${b.audience || "(infer)"}` : "",
+    fw.usesAudienceTone || b.tone.trim() ? `TONE: ${b.tone || "(infer)"}` : "",
     `RESPONSE FORMAT: ${b.outputFormat || "(choose the best)"}`,
     `AUTONOMY: ${b.autonomy} — ${AUTONOMY_GUIDANCE[b.autonomy]}`,
     `DEPTH: ${b.depth}`,
