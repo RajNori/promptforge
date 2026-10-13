@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EMPTY_BRIEF,
   FRAMEWORKS,
@@ -19,13 +19,15 @@ import {
   type Rule,
 } from "@/lib/forge";
 import { Select } from "./Select";
+import { AccountBar, useMe } from "./Account";
+import { useBriefSync, useHistory } from "./useHistory";
+import { LIMITS, cleanText } from "@/lib/sanitize";
 import { ExampleMenu, FieldLabel, Sparkle, StarIcon } from "./ui";
 import { exampleBrief, type ExampleBrief } from "@/lib/examples";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
 
 type Stage = "brief" | "clarify" | "forge";
 type Theme = "system" | "light" | "dark";
-type Version = { id: number; label: string; text: string; missing: string[] };
 
 const REFINE_PRESETS = [
   "Make it tighter — cut 30% without losing rules",
@@ -105,6 +107,20 @@ function sectionBudgets(text: string, target: number): string {
   return parts.map((p) => `- ${p.head}: ${p.words} → ≤ ${Math.max(4, Math.round(p.words * ratio))} words`).join("\n");
 }
 
+const FIELD_MAX: Partial<Record<keyof Brief, number>> = {
+  objective: LIMITS.objective,
+  context: LIMITS.context,
+  role: LIMITS.short,
+  audience: LIMITS.short,
+  tone: LIMITS.short,
+  inputs: LIMITS.medium,
+  deliverable: LIMITS.medium,
+  successCriteria: LIMITS.medium,
+  outputFormat: LIMITS.medium,
+  prefill: LIMITS.prefill,
+  outputSchema: LIMITS.schema,
+};
+
 const X = (
   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -116,8 +132,6 @@ export default function Page() {
   const [stage, setStage] = useState<Stage>("brief");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [answers, setAnswers] = useState<Clarification[]>([]);
-  const [versions, setVersions] = useState<Version[]>([]);
-  const [active, setActive] = useState<number | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
   const [error, setError] = useState("");
@@ -127,12 +141,16 @@ export default function Page() {
   const [accessCode, setAccessCode] = useState("");
   const [theme, setTheme] = useState<Theme>("system");
   const abortRef = useRef<AbortController | null>(null);
-  const verSeq = useRef(0);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
   const [toast, setToast] = useState<{ msg: string; prev?: Brief } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { me, refresh: refreshMe } = useMe();
+  const onHistoryError = useCallback((msg: string) => showToast(msg), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const history = useHistory(me ? me.sync : null, onHistoryError);
+  const { versions, activeId: active, setActiveId: setActive } = history;
+  useBriefSync(history.projectId, brief);
 
   useEffect(() => {
     fetch("/api/generate")
@@ -167,10 +185,16 @@ export default function Page() {
     } catch {}
   }
 
-  const set = <K extends keyof Brief>(k: K, v: Brief[K]) => setBrief((b) => ({ ...b, [k]: v }));
+  // Client-side hygiene mirrors the server (which is the real control): strip invisible/control chars, cap length.
+  const set = <K extends keyof Brief>(k: K, v: Brief[K]) =>
+    setBrief((b) => ({ ...b, [k]: typeof v === "string" && FIELD_MAX[k] ? (cleanText(v, FIELD_MAX[k]!) as Brief[K]) : v }));
   const setExt = (k: keyof Brief["extensions"], v: boolean) => setBrief((b) => ({ ...b, extensions: { ...b.extensions, [k]: v } }));
-  const setRule = (i: number, patch: Partial<Rule>) => setBrief((b) => ({ ...b, rules: b.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) }));
-  const setEx = (i: number, patch: Partial<Example>) => setBrief((b) => ({ ...b, examples: b.examples.map((e, j) => (j === i ? { ...e, ...patch } : e)) }));
+  const cleanPatch = <T extends object>(patch: T, max: number) =>
+    Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, typeof v === "string" ? cleanText(v, max) : v])) as T;
+  const setRule = (i: number, patch: Partial<Rule>) =>
+    setBrief((b) => ({ ...b, rules: b.rules.map((r, j) => (j === i ? { ...r, ...cleanPatch(patch, LIMITS.rule) } : r)) }));
+  const setEx = (i: number, patch: Partial<Example>) =>
+    setBrief((b) => ({ ...b, examples: b.examples.map((e, j) => (j === i ? { ...e, ...cleanPatch(patch, LIMITS.example) } : e)) }));
 
   const fw = resolveFramework(brief);
   const autoFw = FRAMEWORKS[autoPick(brief.target, brief.taskType)];
@@ -205,12 +229,11 @@ export default function Page() {
     } catch {}
   }
 
-  function pushVersion(text: string, label: string) {
-    const id = ++verSeq.current;
+  /** Save a version (or replace one — auto-fixes overwrite the attempt they fixed). */
+  async function pushVersion(text: string, label: string, replaceId?: string) {
     const missing = missingSections(text, brief);
-    setVersions((vs) => [...vs, { id, label, text, missing }]);
-    setActive(id);
-    return missing;
+    const id = await history.save(brief, text, label, missing, replaceId);
+    return { id, missing };
   }
 
   async function stream(body: object): Promise<string | null> {
@@ -241,6 +264,8 @@ export default function Page() {
       const status = acc.slice(eot + 1);
       const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
       if (!clean) throw new Error("Empty response. Please try again.");
+      if (status === "blocked") throw new Error("That request couldn't be processed. Rephrase your brief and try again.");
+      if (status === "off") throw new Error("The output didn't follow the prompt format, so it wasn't saved. Try again or rephrase the brief.");
       if (status === "len") setError("Output hit the length limit and may be incomplete — try Lean depth or turn off chain mode.");
       return clean;
     } catch (e) {
@@ -249,22 +274,24 @@ export default function Page() {
     } finally {
       setStreaming("");
       setStartedAt(null);
+      refreshMe();
     }
   }
 
   /** Validate the framework contract; auto-repair once if headings are missing. */
   async function finish(res: string | null, label: string) {
     if (!res) return;
-    const missing = pushVersion(res, label);
+    const { id, missing } = await pushVersion(res, label);
     if (missing.length) {
       setBusy("repair");
       const fixed = await stream({
         mode: "refine",
+        auto: true,
         brief,
         prompt: res,
         feedback: `The prompt violates the ${fw.name} output contract. Restore these missing required sections with proper headings, in the correct order, without removing anything else: ${missing.join(", ")}.`,
       });
-      if (fixed) pushVersion(fixed, "auto-repair");
+      if (fixed) await pushVersion(fixed, `${label} (repaired)`, id);
     }
   }
 
@@ -284,6 +311,7 @@ export default function Page() {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Suggestion failed");
+      refreshMe();
       const values = d.values as Partial<Brief>;
       const keys = Object.keys(values) as SuggestField[];
       setBrief((b) => ({ ...b, ...values }));
@@ -302,6 +330,24 @@ export default function Page() {
     setAnswers([]);
     setStage("brief");
     showToast(`Loaded example: ${ex.name}`, brief);
+  }
+
+  function newPrompt() {
+    history.reset();
+    setBrief(EMPTY_BRIEF);
+    setAnalysis(null);
+    setAnswers([]);
+    setStage("brief");
+  }
+
+  async function openProject(id: string) {
+    const b = await history.open(id);
+    if (b) {
+      setBrief(migrateBrief(b));
+      setAnalysis(null);
+      setAnswers([]);
+      setStage("forge");
+    }
   }
 
   async function analyze() {
@@ -354,24 +400,28 @@ export default function Page() {
       let res = await stream({ mode: "refine", brief, prompt: current.text, feedback: ask });
       if (!res) return;
 
-      // One automatic retry if a length cut fell short (10% tolerance).
+      const label = (n: number) => (target ? `${text.slice(0, 32)} (${n}w)` : text.slice(0, 40));
+      const { id } = await pushVersion(res, label(countWords(res)));
+      setFeedback("");
+
+      // One automatic retry if a length cut fell short (10% tolerance) — replaces the attempt it fixes.
       if (target && countWords(res) > target * 1.1) {
-        pushVersion(res, text.slice(0, 40));
         setBusy("repair");
         const got = countWords(res);
         const fixed = await stream({
           mode: "refine",
+          auto: true,
           brief,
           prompt: res,
           feedback: `Still too long: ${got} words, must be ≤ ${target}. Cut at least ${got - target} more words. Per-section budgets (current → max):\n${sectionBudgets(res, target)}\nCompress every section to its budget: one line per bullet, no restated context, no filler words. Keep every heading, every rule with its reason, and every acceptance criterion.`,
         });
-        if (fixed) res = fixed;
-        else return;
+        if (fixed) {
+          res = fixed;
+          await pushVersion(res, label(countWords(res)), id);
+        }
       }
       const final = countWords(res);
-      pushVersion(res, target ? `${text.slice(0, 32)} (${final}w)` : text.slice(0, 40));
       if (target && final > target * 1.1) showToast(`Closest result: ${before} → ${final} words (target ${target}). Refine again to cut further.`);
-      setFeedback("");
     } finally {
       setBusy(null);
     }
@@ -394,7 +444,7 @@ export default function Page() {
     const blob = new Blob([current.text], { type: "text/markdown" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `prompt-${fw.id}-v${current.id}.md`;
+    a.download = `prompt-${fw.id}-v${current.seq}.md`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -419,12 +469,15 @@ export default function Page() {
           </h1>
           <span>One brief → RISEN · CO-STAR · RTF · CRISPE · BAB</span>
         </div>
+        <div className="top-r">
+        <AccountBar me={me} onOpenProject={openProject} onNewProject={newPrompt} />
         <div className="theme" role="radiogroup" aria-label="Theme">
           {(["system", "light", "dark"] as const).map((t) => (
             <button key={t} role="radio" aria-checked={theme === t} aria-label={t} title={t[0].toUpperCase() + t.slice(1)} className={theme === t ? "on" : ""} onClick={() => applyTheme(t)}>
               {THEME_ICONS[t]}
             </button>
           ))}
+        </div>
         </div>
       </header>
 
@@ -444,16 +497,8 @@ export default function Page() {
             </nav>
             <div style={{ display: "flex", gap: 6 }}>
               <ExampleMenu onPick={loadExample} currentType={brief.taskType} />
-              <button
-                className="btn ghost sm"
-                onClick={() => {
-                  setBrief(EMPTY_BRIEF);
-                  setAnalysis(null);
-                  setAnswers([]);
-                  setStage("brief");
-                }}
-              >
-                Reset
+              <button className="btn ghost sm" onClick={newPrompt} title="Start a new prompt">
+                New
               </button>
             </div>
           </div>
@@ -482,7 +527,7 @@ export default function Page() {
                   </div>
                   <div className="field">
                     <FieldLabel field="role" label="Role" hint="optional" spark={spark("role")} />
-                    <input type="text" value={brief.role} onChange={(e) => set("role", e.target.value)} placeholder="Principal engineer, Next.js + Supabase" />
+                    <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder="Principal engineer, Next.js + Supabase" />
                   </div>
                 </div>
 
@@ -510,7 +555,7 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
-                  <textarea rows={3} value={brief.objective} onChange={(e) => set("objective", e.target.value)} placeholder="Implement…, migrate…, write…, analyse…" />
+                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder="Implement…, migrate…, write…, analyse…" />
                 </div>
 
                 <div className="field">
@@ -520,18 +565,18 @@ export default function Page() {
                     hint={fw.id === "bab" ? "what exists today, what's wrong" : "stack, background, situation"}
                     spark={spark("context")}
                   />
-                  <textarea rows={3} value={brief.context} onChange={(e) => set("context", e.target.value)} placeholder="Next.js 16, TypeScript, Supabase RLS, Vercel…" />
+                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder="Next.js 16, TypeScript, Supabase RLS, Vercel…" />
                 </div>
 
                 {fw.usesAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={fw.name} spark={spark("audience")} />
-                      <input type="text" value={brief.audience} onChange={(e) => set("audience", e.target.value)} placeholder="Technical founders evaluating vendors" />
+                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder="Technical founders evaluating vendors" />
                     </div>
                     <div className="field">
                       <FieldLabel field="tone" label="Tone" hint={fw.name} spark={spark("tone")} />
-                      <input type="text" value={brief.tone} onChange={(e) => set("tone", e.target.value)} placeholder="Direct, credible, zero hype" />
+                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder="Direct, credible, zero hype" />
                     </div>
                   </div>
                 )}
@@ -539,11 +584,11 @@ export default function Page() {
                 <div className="row">
                   <div className="field">
                     <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
-                    <textarea rows={2} value={brief.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder="PR-ready feature, article, spec…" />
+                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder="PR-ready feature, article, spec…" />
                   </div>
                   <div className="field">
                     <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
-                    <textarea rows={2} value={brief.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder="Tests pass, p95 < 200ms…" />
+                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder="Tests pass, p95 < 200ms…" />
                   </div>
                 </div>
 
@@ -552,9 +597,9 @@ export default function Page() {
                   <div className="rules">
                     {brief.rules.map((r, i) => (
                       <div className="rule" key={i}>
-                        <input type="text" value={r.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder="No new dependencies" aria-label={`Rule ${i + 1}`} />
+                        <input type="text" value={r.rule} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { rule: e.target.value })} placeholder="No new dependencies" aria-label={`Rule ${i + 1}`} />
                         <span className="because">because</span>
-                        <input type="text" value={r.why} onChange={(e) => setRule(i, { why: e.target.value })} placeholder="bundle budget (optional)" aria-label={`Reason for rule ${i + 1}`} />
+                        <input type="text" value={r.why} maxLength={LIMITS.rule} onChange={(e) => setRule(i, { why: e.target.value })} placeholder="bundle budget (optional)" aria-label={`Reason for rule ${i + 1}`} />
                         <button
                           className="icon-btn"
                           aria-label="Remove rule"
@@ -574,11 +619,11 @@ export default function Page() {
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="prefill" label="Prefill" hint="first assistant tokens" spark={spark("prefill")} />
-                      <textarea rows={3} className="mono" value={brief.prefill} onChange={(e) => set("prefill", e.target.value)} placeholder={'{"result": '} />
+                      <textarea rows={3} className="mono" value={brief.prefill} maxLength={FIELD_MAX.prefill} onChange={(e) => set("prefill", e.target.value)} placeholder={'{"result": '} />
                     </div>
                     <div className="field">
                       <FieldLabel field="outputSchema" label="Output schema" hint="JSON" spark={spark("outputSchema")} />
-                      <textarea rows={3} className="mono" value={brief.outputSchema} onChange={(e) => set("outputSchema", e.target.value)} placeholder={'{ "type": "object", "properties": { … } }'} />
+                      <textarea rows={3} className="mono" value={brief.outputSchema} maxLength={FIELD_MAX.outputSchema} onChange={(e) => set("outputSchema", e.target.value)} placeholder={'{ "type": "object", "properties": { … } }'} />
                     </div>
                   </div>
                 )}
@@ -623,8 +668,8 @@ export default function Page() {
                           </button>
                         </div>
                         <div className="row">
-                          <textarea rows={3} value={ex.input} onChange={(e) => setEx(i, { input: e.target.value })} placeholder="Input" />
-                          <textarea rows={3} value={ex.output} onChange={(e) => setEx(i, { output: e.target.value })} placeholder="Ideal output" />
+                          <textarea rows={3} value={ex.input} maxLength={LIMITS.example} onChange={(e) => setEx(i, { input: e.target.value })} placeholder="Input" />
+                          <textarea rows={3} value={ex.output} maxLength={LIMITS.example} onChange={(e) => setEx(i, { output: e.target.value })} placeholder="Ideal output" />
                         </div>
                       </div>
                     ))}
@@ -638,11 +683,11 @@ export default function Page() {
                   <div className="row">
                     <div className="field">
                       <FieldLabel field="inputs" label="Inputs / assets" spark={spark("inputs")} />
-                      <textarea rows={2} value={brief.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder="Files, docs, keys, data available" />
+                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder="Files, docs, keys, data available" />
                     </div>
                     <div className="field">
                       <FieldLabel field="outputFormat" label="Response format" spark={spark("outputFormat")} />
-                      <textarea rows={2} value={brief.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder="Final report shape, length, structure" />
+                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder="Final report shape, length, structure" />
                     </div>
                   </div>
                   <div className="row">
@@ -745,6 +790,7 @@ export default function Page() {
                     <input
                       type="text"
                       value={q.answer}
+                      maxLength={LIMITS.answer}
                       onChange={(e) => setAnswers((a) => a.map((x, j) => (j === i ? { ...x, answer: e.target.value } : x)))}
                       onKeyDown={(e) => e.key === "Enter" && i === answers.length - 1 && generate()}
                       placeholder="Answer, or leave blank to let the model decide"
@@ -770,10 +816,22 @@ export default function Page() {
             <div className="versions">
               {versions.length === 0 && <span className="note">Output</span>}
               {versions.map((v) => (
-                <button key={v.id} className={`ver ${v.id === active ? "on" : ""} ${v.missing.length ? "warn" : ""}`} onClick={() => setActive(v.id)} title={v.label}>
-                  v{v.id}
-                </button>
+                <span key={v.id} className={`ver-wrap ${v.id === active ? "on" : ""}`}>
+                  <button className={`ver ${v.id === active ? "on" : ""} ${v.missing.length ? "warn" : ""} ${v.pinned ? "pinned" : ""}`} onClick={() => setActive(v.id)} title={v.label}>
+                    v{v.seq}
+                  </button>
+                  <button className={`pin ${v.pinned ? "on" : ""}`} onClick={() => history.togglePin(v.id)} title={v.pinned ? "Unpin (may be removed once 5 newer versions exist)" : "Pin — keep this version"} aria-label={v.pinned ? `Unpin v${v.seq}` : `Pin v${v.seq}`} aria-pressed={v.pinned}>
+                    <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
+                      <path d="M10 1.5l4.5 4.5-2 1-2.5 2.5.5 3.5-1.5 1.5L6 11l-3.5 3.5L1.5 13.5 5 10 2 7l1.5-1.5 3.5.5L9.5 3.5z" fill={v.pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </span>
               ))}
+              {versions.some((v) => !v.pinned) && (
+                <button className="clear-hist" onClick={() => confirm("Clear unpinned versions?") && history.clear()} title="Remove unpinned versions">
+                  Clear
+                </button>
+              )}
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {busy === "repair" && <span className="meta">auto-fixing…</span>}
@@ -823,7 +881,8 @@ export default function Page() {
               <div className="refine-row">
                 <textarea
                   value={feedback}
-                  onChange={(e) => setFeedback(e.target.value)}
+                  maxLength={LIMITS.feedback}
+                  onChange={(e) => setFeedback(cleanText(e.target.value, LIMITS.feedback))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) refine();
                   }}

@@ -3,12 +3,17 @@ import {
   ANALYZE_SYSTEM,
   briefToText,
   generateSystem,
-  migrateBrief,
+  missingSections,
   refineSystem,
+  requiredHeadings,
   targetGuidance,
   type Brief,
-  type Clarification,
 } from "@/lib/forge";
+import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
+import { getViewer } from "@/lib/server/account";
+import { precheck, record } from "@/lib/server/metering";
+import { unitsFor } from "@/lib/plans";
+import { cleanText } from "@/lib/sanitize";
 import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 
 export const runtime = "nodejs";
@@ -45,27 +50,12 @@ const configured = () => {
   return Boolean(c.url && c.key && c.model);
 };
 
-// Best-effort per-instance rate limit (20 req / 10 min / IP). Not a substitute for ACCESS_CODE.
-const hits = new Map<string, number[]>();
-function limited(ip: string) {
-  const now = Date.now();
-  const arr = (hits.get(ip) ?? []).filter((t) => now - t < 600_000);
-  arr.push(now);
-  hits.set(ip, arr);
-  return arr.length > 20;
-}
-
-type Body =
-  | { mode: "analyze"; brief: Brief }
-  | { mode: "generate"; brief: Brief; clarifications: Clarification[] }
-  | { mode: "refine"; brief: Brief; prompt: string; feedback: string }
-  | { mode: "suggest"; brief: Brief; field: SuggestField | "all" };
-
 function json(status: number, data: unknown) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
 const GENERIC_FAIL = "Generation failed. Please try again.";
+const sys = (canary: string, content: string) => `${securityPreamble(canary)}\n\n${content}`;
 
 export async function GET() {
   return json(200, { configured: configured(), requiresAccessCode: Boolean(process.env.ACCESS_CODE) });
@@ -73,35 +63,51 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode." });
+  if (!sameOrigin(req)) return json(403, { error: "Forbidden." });
   const { url, key, model, extra: baseExtra, fast } = cfg();
 
   const code = process.env.ACCESS_CODE;
   if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code." });
 
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anon";
-  if (limited(ip)) return json(429, { error: "Rate limit hit. Try again in a few minutes." });
-
-  let body: Body;
+  // Hard cap on body size before parsing (largest legit body is ~60KB).
+  const raw = await req.text().catch(() => "");
+  if (raw.length > 120_000) return json(413, { error: "Request too large." });
+  let parsedJson: unknown;
   try {
-    body = (await req.json()) as Body;
+    parsedJson = JSON.parse(raw);
   } catch {
     return json(400, { error: "Invalid JSON" });
   }
-  if (!body?.brief) return json(400, { error: "Brief is required." });
-  body.brief = migrateBrief(body.brief);
-  if (!body.brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
+  const parsed = BodySchema.safeParse(parsedJson);
+  if (!parsed.success) return json(400, { error: "Invalid request." });
+  const body = parsed.data;
+  const brief = asBrief(body.brief);
+  if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
 
-  // Field suggestions resolve which fields to fill before building messages.
+  // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
   if (body.mode === "suggest") {
-    if (!hasSignal(body.brief)) return json(400, { error: "Add an objective or some context first." });
-    const allowed = applicableFields(body.brief);
-    suggestFields = body.field === "all" ? allowed.filter((f) => isEmpty(body.brief, f)) : allowed.includes(body.field) ? [body.field] : [];
-    if (!suggestFields.length) return json(400, { error: body.field === "all" ? "Nothing to fill — all fields have values." : "Unknown field." });
+    if (!hasSignal(brief)) return json(400, { error: "Add an objective or some context first." });
+    const allowed = applicableFields(brief);
+    const f = body.field as SuggestField | "all";
+    suggestFields = f === "all" ? allowed.filter((x) => isEmpty(brief, x)) : allowed.includes(f) ? [f] : [];
+    if (!suggestFields.length) return json(400, { error: f === "all" ? "Nothing to fill — all fields have values." : "Unknown field." });
   }
+  if (body.mode === "refine" && (!body.prompt.trim() || !body.feedback.trim())) return json(400, { error: "Prompt and feedback are required." });
 
-  const guidance = targetGuidance(body.brief.target);
+  // Identity, burst limit and quota.
+  const viewer = await getViewer(req);
+  const auto = body.mode === "refine" && body.auto;
+  const units = auto ? 0 : unitsFor(body.mode, brief.chain);
+  const check = await precheck(viewer, units, auto);
+  if (!check.ok) return json(check.status, { error: check.error, code: check.code });
+
+  const userText = [brief.objective, brief.context, body.mode === "refine" ? body.feedback : ""].join("\n");
+  if (suspicious(userText)) console.warn("[guard] suspicious input", { subject: viewer.subject, mode: body.mode });
+
+  const guidance = targetGuidance(brief.target);
   const extra = body.mode === "generate" ? baseExtra : { ...baseExtra, ...fast };
+  const canary = makeCanary();
 
   let messages: { role: string; content: string }[];
   let stream = true;
@@ -111,32 +117,29 @@ export async function POST(req: NextRequest) {
     stream = false;
     temperature = 0.5;
     messages = [
-      { role: "system", content: SUGGEST_SYSTEM },
-      { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${briefToText(body.brief)}\n\n${suggestRequest(body.brief, suggestFields)}` },
+      { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
+      { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields)}` },
     ];
   } else if (body.mode === "analyze") {
     stream = false;
     temperature = 0.2;
     messages = [
-      { role: "system", content: ANALYZE_SYSTEM },
-      { role: "user", content: `${guidance}\n\nBRIEF:\n${briefToText(body.brief)}` },
+      { role: "system", content: sys(canary, ANALYZE_SYSTEM) },
+      { role: "user", content: `${guidance}\n\nBRIEF:\n${untrusted("brief", briefToText(brief))}` },
     ];
   } else if (body.mode === "generate") {
     messages = [
-      { role: "system", content: generateSystem(body.brief) },
-      { role: "user", content: `${guidance}\n\nWrite the prompt for this brief:\n\n${briefToText(body.brief, body.clarifications)}` },
-    ];
-  } else if (body.mode === "refine") {
-    if (!body.prompt?.trim() || !body.feedback?.trim()) return json(400, { error: "Prompt and feedback are required." });
-    messages = [
-      { role: "system", content: refineSystem(body.brief) },
-      {
-        role: "user",
-        content: `${guidance}\n\nORIGINAL BRIEF:\n${briefToText(body.brief)}\n\nCURRENT PROMPT:\n<<<\n${body.prompt.slice(0, 30_000)}\n>>>\n\nFEEDBACK TO APPLY:\n${body.feedback.slice(0, 4_000)}`,
-      },
+      { role: "system", content: sys(canary, generateSystem(brief)) },
+      { role: "user", content: `${guidance}\n\nWrite the prompt for this brief:\n\n${untrusted("brief", briefToText(brief, body.clarifications))}` },
     ];
   } else {
-    return json(400, { error: "Unknown mode" });
+    messages = [
+      { role: "system", content: sys(canary, refineSystem(brief)) },
+      {
+        role: "user",
+        content: `${guidance}\n\nORIGINAL BRIEF:\n${untrusted("brief", briefToText(brief))}\n\nCURRENT PROMPT:\n${untrusted("current_prompt", body.prompt)}\n\nFEEDBACK TO APPLY:\n${untrusted("feedback", body.feedback)}`,
+      },
+    ];
   }
 
   const call = (jsonMode: boolean) =>
@@ -150,7 +153,7 @@ export async function POST(req: NextRequest) {
         stream,
         temperature,
         // Ceilings: reasoning models spend hidden tokens first, but providers reserve credit against max_tokens.
-        max_tokens: body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : body.brief.chain ? 10000 : 6000,
+        max_tokens: body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : brief.chain ? 10000 : 6000,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
@@ -174,15 +177,22 @@ export async function POST(req: NextRequest) {
     return json(502, { error: GENERIC_FAIL });
   }
 
+  // Charge only once the provider has accepted the call.
+  const meterMode = auto ? "auto" : body.mode;
+
   if (!stream) {
     const data = await upstream.json().catch(() => null);
-    if (data?.usage) console.log("[generate] usage", body.mode, JSON.stringify(data.usage));
-    const raw: string = data?.choices?.[0]?.message?.content ?? "";
-    const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+    await record(viewer, meterMode, units, data?.usage?.total_tokens);
+    const rawOut: string = data?.choices?.[0]?.message?.content ?? "";
+    if (rawOut.includes(canary)) {
+      console.error("[guard] canary leak blocked", { subject: viewer.subject, mode: body.mode });
+      return json(422, { error: "That request couldn't be processed." });
+    }
+    const cleaned = rawOut.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     if (body.mode === "suggest") {
       const values = parseSuggestions(cleaned, suggestFields);
       if (!Object.keys(values).length)
-        console.error("[suggest] unparseable", { finish: data?.choices?.[0]?.finish_reason, len: raw.length, head: raw.slice(0, 300), tail: raw.slice(-200) });
+        console.error("[suggest] unparseable", { finish: data?.choices?.[0]?.finish_reason, len: rawOut.length });
       // Models occasionally drop keys in multi-field requests — one targeted follow-up for the gaps.
       const missing = suggestFields.filter((f) => !(f in values));
       if (missing.length) {
@@ -196,41 +206,50 @@ export async function POST(req: NextRequest) {
             max_tokens: 5000,
             response_format: { type: "json_object" },
             messages: [
-              { role: "system", content: SUGGEST_SYSTEM },
-              { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${briefToText({ ...body.brief, ...values } as Brief)}\n\n${suggestRequest(body.brief, missing)}` },
+              { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
+              {
+                role: "user",
+                content: `${guidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText({ ...brief, ...values } as Brief))}\n\n${suggestRequest(brief, missing)}`,
+              },
             ],
           }),
         }).catch(() => null);
         if (retry?.ok) {
           const d2 = await retry.json().catch(() => null);
           const raw2: string = d2?.choices?.[0]?.message?.content ?? "";
-          Object.assign(values, parseSuggestions(raw2.replace(/^```(?:json)?\s*|\s*```$/g, "").trim(), missing));
+          if (!raw2.includes(canary)) Object.assign(values, parseSuggestions(raw2.replace(/^```(?:json)?\s*|\s*```$/g, "").trim(), missing));
         }
       }
       if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
       return json(200, { values });
     }
     try {
-      const parsed = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
+      const p = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
+      const q = (Array.isArray(p.questions) ? p.questions : [])
+        .slice(0, 4)
+        .map((x: { question?: unknown; why?: unknown }) => ({ question: cleanText(x?.question, 500), why: cleanText(x?.why, 300) }))
+        .filter((x: { question: string }) => x.question);
       return json(200, {
-        score: Math.max(0, Math.min(100, Number(parsed.score) || 0)),
-        gaps: Array.isArray(parsed.gaps) ? parsed.gaps.slice(0, 6) : [],
-        questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 4) : [],
+        score: Math.max(0, Math.min(100, Number(p.score) || 0)),
+        gaps: (Array.isArray(p.gaps) ? p.gaps : []).slice(0, 6).map((g: unknown) => cleanText(g, 300)).filter(Boolean),
+        questions: q,
       });
     } catch {
       return json(200, { score: 50, gaps: [], questions: [] });
     }
   }
 
-  // Re-stream upstream SSE as plain text chunks (content deltas only).
+  // Re-stream upstream SSE as plain text chunks (content deltas only), validating the full output at the end.
   const reader = upstream.body!.getReader();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const out = new ReadableStream({
     async start(controller) {
       let buf = "";
+      let full = "";
       let finish: string | null = null;
       let failed = false;
+      let tokens: number | undefined;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -249,10 +268,14 @@ export async function POST(req: NextRequest) {
                 console.error("[generate] stream error", evt.error);
                 failed = true;
               }
-              if (evt.usage) console.log("[generate] usage", body.mode, JSON.stringify(evt.usage));
+              if (evt.usage) tokens = evt.usage.total_tokens;
               const choice = evt?.choices?.[0];
-              const delta = choice?.delta?.content;
-              if (delta) controller.enqueue(encoder.encode(delta));
+              const delta: string | undefined = choice?.delta?.content;
+              if (delta) {
+                full += delta;
+                // Strip the canary if it arrives whole in one delta; split canaries are caught by the final check (output discarded).
+                controller.enqueue(encoder.encode(delta.replaceAll(canary, "")));
+              }
               if (choice?.finish_reason) finish = choice.finish_reason;
             } catch {
               /* keep-alive / partial */
@@ -263,9 +286,20 @@ export async function POST(req: NextRequest) {
         failed = true;
         console.error("[generate] stream read failed", e);
       } finally {
-        // Signal a clean finish (or a length cut-off) so the client can tell complete output from a dropped stream.
-        if (!failed && finish) controller.enqueue(encoder.encode(EOT + (finish === "length" ? "len" : "ok")));
-        else console.error("[generate] stream ended without clean finish", { finish, failed });
+        await record(viewer, meterMode, units, tokens);
+        let status: string | null = null;
+        if (!failed && finish) {
+          status = finish === "length" ? "len" : "ok";
+          if (full.includes(canary)) {
+            status = "blocked";
+            console.error("[guard] canary leak blocked", { subject: viewer.subject, mode: body.mode });
+          } else if (requiredHeadings(brief).length && missingSections(full, brief).length === requiredHeadings(brief).length && !brief.chain) {
+            // Not a prompt at all (e.g. the model was steered into answering the task directly).
+            status = "off";
+            console.warn("[guard] off-task output", { subject: viewer.subject, mode: body.mode, len: full.length });
+          }
+        } else console.error("[generate] stream ended without clean finish", { finish, failed });
+        if (status) controller.enqueue(encoder.encode(EOT + status));
         controller.close();
       }
     },

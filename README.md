@@ -18,41 +18,56 @@ The model analyses the brief, asks targeted gap questions, generates against a h
 - **Offline template mode.** Deterministic output for every framework with no API call.
 - **Light/dark/system themes.** Accessible custom dropdown and version history (v1, v2…), with `.md` export.
 
+## Accounts, plans & data
+
+- **Auth:** Auth.js v5 (Google / GitHub) with the Prisma adapter; providers turn on when their env vars exist.
+- **Database:** Prisma 7 + Postgres (Vercel Prisma Postgres). Migrations run automatically at build when `DATABASE_URL` is set; without it the app runs in guest-only mode.
+- **Plans** (`lib/plans.ts`): Guest 3 AI generations/day · Free 30/month · Pro 1,000/month. Autofill and analysis are free (burst-limited). `ADMIN_EMAILS` get Pro.
+- **History:** last 5 versions per prompt plus up to 10 pinned; auto-fixes replace the attempt they fix. Synced for signed-in users, in the browser for guests.
+
+## Security model
+
+The server is the security boundary; client-side checks are UX only.
+
+| Layer | Control |
+|---|---|
+| Request | Zod schema on every body, unknown keys dropped, per-field length caps, 120 KB body cap, same-origin check |
+| Text hygiene | NFKC normalisation; zero-width, bidi-override, Unicode tag and control characters stripped (client + server) |
+| Prompt injection | Security preamble with highest priority; all user content wrapped in `<untrusted_*>` tags; spoofed delimiter/system tags defanged; suspicious phrasing logged |
+| Output | Per-request canary detects system-prompt leaks (output discarded); off-task output (no framework sections) discarded; JSON outputs re-sanitised |
+| Abuse / cost | DB-backed burst limits and plan quotas per user or hashed IP; free auto-repairs capped relative to paid calls; provider details never exposed |
+| Data | Ownership checked on every project/version route; raw IPs never stored |
+| Headers | CSP, `X-Frame-Options: DENY`, `nosniff`, strict referrer, permissions policy |
+
 ## Stack
 
-Next.js 16 (App Router) · React 19 · TypeScript · no UI dependencies · any OpenAI-compatible LLM API (streaming) · Vercel
+Next.js 16 (App Router) · React 19 · TypeScript · Prisma 7 · Auth.js v5 · Zod · any OpenAI-compatible LLM API · Vercel
 
 ```
 app/
-  page.tsx               # UI: brief → clarify → forge/refine
-  Select.tsx             # accessible themeable listbox
-  api/generate/route.ts  # analyze | generate | refine → server-side LLM wrapper (streamed)
+  page.tsx                     # brief → clarify → forge/refine
+  Account.tsx, useHistory.ts   # account bar, library, versions
+  api/generate/route.ts        # analyze | generate | refine | suggest (guarded, metered, streamed)
+  api/me, api/projects/**      # account + saved prompts/versions
+  pricing, signin, terms, privacy
 lib/
-  forge.ts               # frameworks, auto-pick, contracts, validator, offline compiler
+  forge.ts                     # frameworks, contracts, validator, offline compiler
+  server/{db,account,guard,metering,projects}.ts
+prisma/schema.prisma           # User/Account/Session, Project, Version, UsageEvent
 ```
 
 ## Run locally
 
 ```bash
 npm install
-cp .env.example .env.local   # add provider URL, key, model
+cp .env.example .env.local     # AI provider, DATABASE_URL, AUTH_* vars
+npx prisma migrate deploy
 npm run dev
 ```
 
 ## Environment
 
-| Var | Required | Notes |
-|---|---|---|
-| `AI_BASE_URL` | yes | OpenAI-compatible base URL (the route calls `/chat/completions`) |
-| `AI_API_KEY` | yes | Provider API key |
-| `AI_MODEL` | yes | Model id |
-| `ACCESS_CODE` | recommended | When set, the API requires this code (the UI prompts for it) |
-| `AI_EXTRA_BODY` | no | JSON merged into every upstream request for provider-specific params (e.g. reasoning effort) |
-| `AI_FAST_BODY` | no | JSON merged over `AI_EXTRA_BODY` for light calls (analyze, suggest, refine), e.g. reasoning off |
-
-The provider, model and upstream errors stay server-side. The browser only ever talks to `/api/generate`, and clients cannot override the model.
-
-Without a key the app still works in **Instant template** mode.
+See `.env.example` for every variable with notes.
 
 ## License
 
