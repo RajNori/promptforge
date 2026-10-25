@@ -1,6 +1,8 @@
 // Field guidance — shared by the UI tooltips and the AI field-suggest endpoint.
 
 import { resolveFramework, type Brief } from "./forge";
+import { placeholderFor, type PhField } from "./placeholders";
+import type { PersonaId } from "./personas";
 
 export type SuggestField =
   | "role"
@@ -36,7 +38,7 @@ export type FieldHelp = { label: string; tip: string; good: string; avoid?: stri
 export const FIELD_HELP: Record<SuggestField | "examples", FieldHelp> = {
   role: {
     label: "Role",
-    tip: "Name a specific senior expert: seniority, domain and stack. Specific roles pull specific knowledge.",
+    tip: "Name a specific expert: seniority and specialty (e.g. children's picture-book author, senior Postgres engineer). Specific roles pull specific knowledge.",
     good: "Staff backend engineer specialising in Postgres performance and Supabase RLS",
     avoid: "Helpful assistant · expert developer",
   },
@@ -48,18 +50,18 @@ export const FIELD_HELP: Record<SuggestField | "examples", FieldHelp> = {
   },
   context: {
     label: "Context",
-    tip: "Facts the model can't guess: stack and versions, what exists today, scale, who it's for.",
+    tip: "Facts the model can't guess: background, what exists today, constraints, who it's for.",
     good: "Next.js 16 App Router + Supabase. users table ~40k rows. Exports are done manually via SQL today.",
     avoid: "Our app",
   },
   inputs: {
     label: "Inputs / assets",
-    tip: "What the model can read or use: files, docs, data, links. Never paste secrets.",
+    tip: "What the model can read or use: notes, documents, data, files, links. Never paste secrets.",
     good: "/lib/db.ts, /app/admin/users/page.tsx, sample export in /fixtures/users.csv",
   },
   deliverable: {
     label: "Deliverable",
-    tip: "The concrete artifact and its shape: PR, doc, JSON, email — with size or sections.",
+    tip: "The concrete thing you want back and its shape: length, sections, format (story, email, doc, PR, JSON…).",
     good: "A PR with route handler, export button component, and tests",
     avoid: "A solution",
   },
@@ -131,8 +133,10 @@ export function hasSignal(b: Brief): boolean {
 export const SUGGEST_SYSTEM = `You are a principal prompt engineer helping a user complete a prompt brief. You write values for specific brief fields.
 
 Rules:
-- Ground every value in what the brief already says (objective, context, target, task type, framework, other fields). Never contradict it.
-- Be concrete and specific to this task: real nouns, numbers, file names or audiences where the brief implies them. No generic filler.
+- Ground every value in what the brief already says (objective, context, task type, the user's role, other fields). Never contradict it.
+- Write for THIS task's domain. The style examples show length and shape only — never copy their subject matter (e.g. no code, repos or tests for a children's book).
+- Never invent facts the user hasn't given: names, characters, plots, brands, prices, dates, page counts, numbers. Where a specific detail is needed but unknown, write a fill-in in square brackets with a short hint, e.g. "[age range, e.g. 4–6]" or "[main character's name]".
+- Prefer sensible, widely-true defaults for the domain over guesses, and keep the user's own wording.
 - Keep values tight: role/tone/audience ≤ 20 words; objective/context/deliverable ≤ 2 sentences; response format ≤ 2 sentences.
 - Success criteria: 3–5 lines, one testable check per line, each ≤ 18 words, no bullets or numbering, no "verified by…" instructions.
 - Rules: 3–5 items; rule ≤ 14 words; why ≤ 12 words, stating the consequence it prevents.
@@ -142,14 +146,23 @@ Rules:
 
 Respond with ONLY valid JSON, no prose, no code fences.`;
 
-export function suggestRequest(b: Brief, fields: SuggestField[]): string {
+const PH_FIELDS = new Set<string>(["role", "objective", "context", "audience", "tone", "deliverable", "successCriteria", "inputs", "outputFormat"]);
+
+/** Style example for a field, matched to the task type (and the user's role) — never a developer example for a writing task. */
+function styleExample(f: SuggestField, b: Brief, persona?: PersonaId | null): string {
+  if (f === "rules") return `${placeholderFor("rule", b.taskType, persona)} — because ${placeholderFor("why", b.taskType, persona).replace(/\s*\(optional\)$/, "")}`;
+  if (PH_FIELDS.has(f)) return placeholderFor(f as PhField, b.taskType, persona);
+  return FIELD_HELP[f].good;
+}
+
+export function suggestRequest(b: Brief, fields: SuggestField[], persona?: PersonaId | null): string {
   const shape: Record<string, string> = {};
   for (const f of fields) shape[f] = f === "rules" ? '[{"rule": "...", "why": "..."}]' : '"..."';
   return `FIELDS TO WRITE:\n${fields
     .map((f) => {
       const h = FIELD_HELP[f];
       const cur = f === "rules" ? b.rules.filter((r) => r.rule.trim()).map((r) => `${r.rule} — ${r.why}`).join("; ") : String(b[f] ?? "");
-      return `- ${f} (${h.label}): ${h.tip} Good example of the style: ${h.good}${cur.trim() ? `\n  CURRENT VALUE (improve it): ${cur}` : ""}`;
+      return `- ${f} (${h.label}): ${h.tip} Style example (shape only, different task): ${styleExample(f, b, persona)}${cur.trim() ? `\n  CURRENT VALUE (improve it): ${cur}` : ""}`;
     })
     .join("\n")}\n\nReturn JSON exactly in this shape: {${Object.entries(shape)
     .map(([k, v]) => `"${k}": ${v}`)

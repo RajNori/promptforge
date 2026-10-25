@@ -408,7 +408,7 @@ export default function Page() {
     setSparking(field);
     const prev = brief;
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, persona: profile?.persona }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Suggestion failed");
       refreshMe();
@@ -416,7 +416,9 @@ export default function Page() {
       const keys = Object.keys(values) as SuggestField[];
       setBrief((b) => ({ ...b, ...values }));
       const names = keys.map((k) => FIELD_HELP[k].label);
-      showToast(field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}: ${names.join(", ")}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`, prev);
+      const gaps = JSON.stringify(values).match(/\[[^\]]{2,60}\]/g)?.length ?? 0;
+      const base = field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`;
+      showToast(gaps ? `${base} — replace the ${gaps} [bracketed] detail${gaps === 1 ? "" : "s"} only you know` : field === "all" ? `${base}: ${names.join(", ")}` : base, prev, gaps ? 14000 : 9000);
     } catch (e) {
       showToast((e as Error).message);
     } finally {

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { EMPTY_BRIEF, FRAMEWORK_ORDER, TARGETS, TASK_TYPES, type Brief } from "@/lib/forge";
 import { SUGGEST_FIELDS } from "@/lib/help";
 import { LIMITS, cleanText } from "@/lib/sanitize";
+import { PERSONA_IDS } from "@/lib/personas";
 
 // ── Schema: every request body is parsed here; unknown keys are dropped, every string is cleaned and capped.
 
@@ -65,7 +66,13 @@ export const BodySchema = z.discriminatedUnion("mode", [
     /** Client-initiated auto-repair (contract or length). Free, but capped server-side. */
     auto: bool,
   }),
-  z.object({ mode: z.literal("suggest"), brief: BriefSchema, field: z.enum(["all", ...SUGGEST_FIELDS] as [string, ...string[]]) }),
+  z.object({
+    mode: z.literal("suggest"),
+    brief: BriefSchema,
+    field: z.enum(["all", ...SUGGEST_FIELDS] as [string, ...string[]]),
+    /** Guest's onboarding role (signed-in users' role comes from their profile). */
+    persona: z.enum(PERSONA_IDS).optional().catch(undefined),
+  }),
 ]);
 
 export type Body = z.infer<typeof BodySchema>;

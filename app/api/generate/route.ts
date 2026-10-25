@@ -15,6 +15,10 @@ import { precheck, record } from "@/lib/server/metering";
 import { unitsFor } from "@/lib/plans";
 import { cleanText } from "@/lib/sanitize";
 import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
+import { persona as personaOf } from "@/lib/personas";
+
+/** Task types where a coding-agent target makes sense. */
+const ENGINEERING_TASKS = new Set(["Build a feature", "Fix a bug", "Refactor / migrate", "Architecture / design", "Code review / audit"]);
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -113,12 +117,25 @@ export async function POST(req: NextRequest) {
   let stream = true;
   let temperature = 0.4;
 
+  // Autofill context: who the user is, and whether the target fits the task.
+  const persona = body.mode === "suggest" ? (viewer.profile?.persona ?? body.persona ?? null) : null;
+  const engineering = ENGINEERING_TASKS.has(brief.taskType);
+  const agentic = brief.target !== "chat-llm" && brief.target !== "api-system";
+  const suggestGuidance = [
+    persona ? `THE USER IS: ${personaOf(persona).label} (${personaOf(persona).blurb}). Write in their domain and vocabulary.` : "",
+    agentic && !engineering
+      ? `NOTE: this is a ${brief.taskType} task, not software work. Ignore the coding-agent target for field content — no repos, files, code, tests or PRs. Write values for the ${brief.taskType.toLowerCase()} task itself.`
+      : guidance,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   if (body.mode === "suggest") {
     stream = false;
     temperature = 0.5;
     messages = [
       { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
-      { role: "user", content: `${guidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields)}` },
+      { role: "user", content: `${suggestGuidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields, persona)}` },
     ];
   } else if (body.mode === "analyze") {
     stream = false;
@@ -209,7 +226,7 @@ export async function POST(req: NextRequest) {
               { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
               {
                 role: "user",
-                content: `${guidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText({ ...brief, ...values } as Brief))}\n\n${suggestRequest(brief, missing)}`,
+                content: `${suggestGuidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText({ ...brief, ...values } as Brief))}\n\n${suggestRequest(brief, missing, persona)}`,
               },
             ],
           }),
