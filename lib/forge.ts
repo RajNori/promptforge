@@ -235,6 +235,34 @@ export const FRAMEWORK_ORDER: FrameworkId[] = ["risen", "costar", "rtf", "crispe
 const AGENTIC: Target[] = ["claude-code", "cursor", "codex", "multi-agent"];
 export const isAgentic = (t: Target) => AGENTIC.includes(t);
 
+/** Task types where a coding-agent target makes sense. */
+export const ENGINEERING_TASKS = new Set(["Build a feature", "Fix a bug", "Refactor / migrate", "Architecture / design", "Code review / audit"]);
+export const isEngineering = (taskType: string) => ENGINEERING_TASKS.has(taskType);
+/** Agent-only extensions: meaningless (and harmful) in a chat or app prompt. */
+export const AGENT_ONLY_EXT = ["evidence", "authorityBoundaries", "definitionOfDone"] as const;
+
+/**
+ * One decision drives every stage: what kind of job is this?
+ * A non-software task from a non-developer never gets coding-agent framing, whatever the stored target says.
+ */
+export function normalizeBrief(b: Brief, persona?: string | null): Brief {
+  let out = b;
+  if (!isEngineering(b.taskType) && isAgentic(b.target) && persona !== "developer") out = { ...out, target: "chat-llm" };
+  if (!isAgentic(out.target)) {
+    out = {
+      ...out,
+      extensions: {
+        ...out.extensions,
+        authorityBoundaries: false,
+        definitionOfDone: false,
+        // Evidence (sources) still helps research/data work in chat; elsewhere it's agent noise.
+        evidence: out.extensions.evidence && (out.taskType === "Research & analysis" || out.taskType === "Data / reporting"),
+      },
+    };
+  }
+  return out;
+}
+
 export function autoPick(target: Target, taskType: string): FrameworkId {
   // Audience- and voice-driven work → CO-STAR.
   if (taskType === "Writing / content" || taskType === "Email / message" || taskType === "Marketing & ads") return "costar";
@@ -306,7 +334,7 @@ export function briefToText(b: Brief, clarifications: Clarification[] = []): str
     fw.usesAudienceTone || b.audience.trim() ? `AUDIENCE: ${b.audience || "(infer)"}` : "",
     fw.usesAudienceTone || b.tone.trim() ? `TONE: ${b.tone || "(infer)"}` : "",
     `RESPONSE FORMAT: ${b.outputFormat || "(choose the best)"}`,
-    `AUTONOMY: ${b.autonomy} — ${AUTONOMY_GUIDANCE[b.autonomy]}`,
+    isAgentic(b.target) ? `AUTONOMY: ${b.autonomy} — ${AUTONOMY_GUIDANCE[b.autonomy]}` : "",
     `DEPTH: ${b.depth}`,
     `MODE: ${b.chain ? "prompt chain (2–4 sequenced prompts)" : "single prompt"}`,
     `SYNTAX: ${b.syntax}`,
@@ -334,9 +362,13 @@ export function extensionSections(b: Brief): { label: string; guide: string }[] 
   if (b.extensions.acceptanceCriteria) out.push({ label: "Acceptance Criteria", guide: "numbered, testable checklist" });
   if (b.extensions.authorityBoundaries && isAgentic(b.target))
     out.push({ label: "Authority Boundaries", guide: "free to change / needs approval / forbidden, plus escalation triggers" });
-  if (b.extensions.evidence) out.push({ label: "Evidence", guide: "every completion claim backed by command output, test results, file paths or sources" });
+  if (b.extensions.evidence)
+    out.push({
+      label: "Evidence",
+      guide: isAgentic(b.target) ? "every completion claim backed by command output, test results, file paths or sources" : "every factual claim backed by a cited source; say so when unsure",
+    });
   if (b.extensions.selfCritique) out.push({ label: "Self-Critique", guide: "review own output against criteria and fix gaps before finalising" });
-  if (b.extensions.definitionOfDone) out.push({ label: "Definition of Done", guide: "done only when criteria and verification pass, or report exactly why not" });
+  if (b.extensions.definitionOfDone && isAgentic(b.target)) out.push({ label: "Definition of Done", guide: "done only when criteria and verification pass, or report exactly why not" });
   if (b.target === "api-system" && b.outputSchema.trim()) out.push({ label: "Output Schema", guide: "the JSON schema verbatim in a ```json block; respond with valid JSON only" });
   if (!fw.hasResponseSection) out.push({ label: "Final Report", guide: "exactly what to return when done" });
   if (b.target === "api-system" && b.prefill.trim())
@@ -399,7 +431,17 @@ function contract(b: Brief): string {
 
 export const ANALYZE_SYSTEM = `${PRIMER}
 
-You are reviewing a prompt brief before writing the prompt. Identify the highest-leverage missing information — what would most change the resulting prompt if known. Ask at most 4 questions, fewer if the brief is strong. Never ask about things already answered. Questions must be specific to this task and answerable in one line. Prefer: scope boundaries, acceptance criteria, environment facts, risky operations, audience/voice (for writing), output shape.
+You are reviewing a prompt brief before writing the prompt. Ask the person for the missing information that only THEY know and that would most change the result. Ask at most 4 questions, fewer if the brief is strong. Never ask about things already answered. Each question must be specific to this task, in plain language, answerable in one line.
+
+What to ask about — the person's intent and content, in their own domain:
+- Who it's for, and what it should achieve for them.
+- Specifics only the person knows: subject, key facts, names, offer, situation, constraints.
+- Taste: tone, length, format, what good looks like, what to avoid.
+- For software tasks only: scope boundaries, environment facts, risky operations, acceptance criteria.
+
+Never ask about prompt mechanics or tooling — framework, chain steps, autonomy, evidence, files, repositories or how the AI should work. Those are your job, not theirs. Never ask about software, files or code for a non-software task.
+
+Score reflects how well the brief captures the person's intent for THIS kind of task. Gaps are short, plain-language notes about missing intent, written for the person.
 
 Respond with ONLY valid JSON, no prose, no code fences:
 {"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters"}]}`;

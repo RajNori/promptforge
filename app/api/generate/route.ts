@@ -7,6 +7,8 @@ import {
   refineSystem,
   requiredHeadings,
   targetGuidance,
+  normalizeBrief,
+  isEngineering,
   type Brief,
 } from "@/lib/forge";
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
@@ -16,9 +18,6 @@ import { unitsFor } from "@/lib/plans";
 import { cleanText } from "@/lib/sanitize";
 import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 import { persona as personaOf } from "@/lib/personas";
-
-/** Task types where a coding-agent target makes sense. */
-const ENGINEERING_TASKS = new Set(["Build a feature", "Fix a bug", "Refactor / migrate", "Architecture / design", "Code review / audit"]);
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -85,7 +84,10 @@ export async function POST(req: NextRequest) {
   const parsed = BodySchema.safeParse(parsedJson);
   if (!parsed.success) return json(400, { error: "Invalid request." });
   const body = parsed.data;
-  const brief = asBrief(body.brief);
+  // Identity first: the user's role decides what kind of job this is, for every stage below.
+  const viewer = await getViewer(req);
+  const persona = viewer.profile?.persona ?? body.persona ?? null;
+  const brief = normalizeBrief(asBrief(body.brief), persona);
   if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
 
   // Field suggestions resolve which fields to fill before metering.
@@ -99,8 +101,7 @@ export async function POST(req: NextRequest) {
   }
   if (body.mode === "refine" && (!body.prompt.trim() || !body.feedback.trim())) return json(400, { error: "Prompt and feedback are required." });
 
-  // Identity, burst limit and quota.
-  const viewer = await getViewer(req);
+  // Burst limit and quota.
   const auto = body.mode === "refine" && body.auto;
   const units = auto ? 0 : unitsFor(body.mode, brief.chain);
   const check = await precheck(viewer, units, auto);
@@ -117,44 +118,38 @@ export async function POST(req: NextRequest) {
   let stream = true;
   let temperature = 0.4;
 
-  // Autofill context: who the user is, and whether the target fits the task.
-  const persona = body.mode === "suggest" ? (viewer.profile?.persona ?? body.persona ?? null) : null;
-  const engineering = ENGINEERING_TASKS.has(brief.taskType);
-  const agentic = brief.target !== "chat-llm" && brief.target !== "api-system";
-  const suggestGuidance = [
-    persona ? `THE USER IS: ${personaOf(persona).label} (${personaOf(persona).blurb}). Write in their domain and vocabulary.` : "",
-    agentic && !engineering
-      ? `NOTE: this is a ${brief.taskType} task, not software work. Ignore the coding-agent target for field content — no repos, files, code, tests or PRs. Write values for the ${brief.taskType.toLowerCase()} task itself.`
-      : guidance,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  // Same framing for every stage: who the user is, what kind of job, what the target is.
+  const who = persona ? `THE USER IS: ${personaOf(persona).label} (${personaOf(persona).blurb}). Stay in their domain and vocabulary.` : "";
+  const domain = isEngineering(brief.taskType)
+    ? `KIND OF JOB: software (${brief.taskType}).`
+    : `KIND OF JOB: ${brief.taskType} — not software. Nothing about code, files, repositories, tests or tooling.`;
+  const framing = [who, domain, guidance].filter(Boolean).join("\n\n");
 
   if (body.mode === "suggest") {
     stream = false;
     temperature = 0.5;
     messages = [
       { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
-      { role: "user", content: `${suggestGuidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields, persona)}` },
+      { role: "user", content: `${framing}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields, persona)}` },
     ];
   } else if (body.mode === "analyze") {
     stream = false;
     temperature = 0.2;
     messages = [
       { role: "system", content: sys(canary, ANALYZE_SYSTEM) },
-      { role: "user", content: `${guidance}\n\nBRIEF:\n${untrusted("brief", briefToText(brief))}` },
+      { role: "user", content: `${framing}\n\nBRIEF:\n${untrusted("brief", briefToText(brief))}` },
     ];
   } else if (body.mode === "generate") {
     messages = [
       { role: "system", content: sys(canary, generateSystem(brief)) },
-      { role: "user", content: `${guidance}\n\nWrite the prompt for this brief:\n\n${untrusted("brief", briefToText(brief, body.clarifications))}` },
+      { role: "user", content: `${framing}\n\nWrite the prompt for this brief:\n\n${untrusted("brief", briefToText(brief, body.clarifications))}` },
     ];
   } else {
     messages = [
       { role: "system", content: sys(canary, refineSystem(brief)) },
       {
         role: "user",
-        content: `${guidance}\n\nORIGINAL BRIEF:\n${untrusted("brief", briefToText(brief))}\n\nCURRENT PROMPT:\n${untrusted("current_prompt", body.prompt)}\n\nFEEDBACK TO APPLY:\n${untrusted("feedback", body.feedback)}`,
+        content: `${framing}\n\nORIGINAL BRIEF:\n${untrusted("brief", briefToText(brief))}\n\nCURRENT PROMPT:\n${untrusted("current_prompt", body.prompt)}\n\nFEEDBACK TO APPLY:\n${untrusted("feedback", body.feedback)}`,
       },
     ];
   }
@@ -226,7 +221,7 @@ export async function POST(req: NextRequest) {
               { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
               {
                 role: "user",
-                content: `${suggestGuidance}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText({ ...brief, ...values } as Brief))}\n\n${suggestRequest(brief, missing, persona)}`,
+                content: `${framing}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText({ ...brief, ...values } as Brief))}\n\n${suggestRequest(brief, missing, persona)}`,
               },
             ],
           }),

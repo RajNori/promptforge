@@ -55,9 +55,12 @@ const Clarifications = z
   .catch([])
   .transform((c) => c.slice(0, LIMITS.clarifications));
 
+/** Guest's onboarding role (signed-in users' role comes from their profile). Invalid values are ignored. */
+const Persona = z.enum(PERSONA_IDS).optional().catch(undefined);
+
 export const BodySchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("analyze"), brief: BriefSchema }),
-  z.object({ mode: z.literal("generate"), brief: BriefSchema, clarifications: Clarifications }),
+  z.object({ mode: z.literal("analyze"), brief: BriefSchema, persona: Persona }),
+  z.object({ mode: z.literal("generate"), brief: BriefSchema, clarifications: Clarifications, persona: Persona }),
   z.object({
     mode: z.literal("refine"),
     brief: BriefSchema,
@@ -65,13 +68,13 @@ export const BodySchema = z.discriminatedUnion("mode", [
     feedback: txt(LIMITS.feedback),
     /** Client-initiated auto-repair (contract or length). Free, but capped server-side. */
     auto: bool,
+    persona: Persona,
   }),
   z.object({
     mode: z.literal("suggest"),
     brief: BriefSchema,
     field: z.enum(["all", ...SUGGEST_FIELDS] as [string, ...string[]]),
-    /** Guest's onboarding role (signed-in users' role comes from their profile). */
-    persona: z.enum(PERSONA_IDS).optional().catch(undefined),
+    persona: Persona,
   }),
 ]);
 

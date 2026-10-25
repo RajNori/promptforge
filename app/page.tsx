@@ -12,6 +12,9 @@ import {
   migrateBrief,
   missingSections,
   resolveFramework,
+  normalizeBrief,
+  isAgentic,
+  isEngineering,
   type Analysis,
   type Brief,
   type Clarification,
@@ -241,6 +244,15 @@ export default function Page() {
     );
   }
 
+  /** The nudge that sets everything else: a non-software task never keeps a coding-agent target. */
+  function changeTaskType(v: string) {
+    const prev = brief;
+    if (!isEngineering(v) && isAgentic(brief.target) && profile?.persona !== "developer") {
+      setBrief((b) => ({ ...normalizeBrief({ ...b, taskType: v as Brief["taskType"] }, profile?.persona), chain: false }));
+      showToast(`Target switched to Chat AI — coding-agent options don't apply to ${v}`, prev);
+    } else set("taskType", v as Brief["taskType"]);
+  }
+
   function finishOnboarding(p: Profile) {
     saveProfile(p);
     setModeState(p.mode);
@@ -292,8 +304,13 @@ export default function Page() {
   const setEx = (i: number, patch: Partial<Example>) =>
     setBrief((b) => ({ ...b, examples: b.examples.map((e, j) => (j === i ? { ...e, ...cleanPatch(patch, LIMITS.example) } : e)) }));
 
-  const fw = resolveFramework(brief);
-  const autoFw = FRAMEWORKS[autoPick(brief.target, brief.taskType)];
+  // Same normalisation as the server: the kind of job decides target-dependent behaviour everywhere.
+  const effective = normalizeBrief(brief, profile?.persona);
+  const agenticTarget = isAgentic(effective.target);
+  /** Could this extension be on for this job? (Agent-only ones can't for chat/app prompts.) */
+  const canEnable = (k: keyof Brief["extensions"]) => normalizeBrief({ ...brief, extensions: { ...brief.extensions, [k]: true } }, profile?.persona).extensions[k];
+  const fw = resolveFramework(effective);
+  const autoFw = FRAMEWORKS[autoPick(effective.target, effective.taskType)];
   const current = versions.find((v) => v.id === active) ?? null;
   const viewingRef = !!reference && viewRef;
   const streamingNow = busy === "generate" || busy === "refine" || busy === "repair";
@@ -302,7 +319,7 @@ export default function Page() {
   const ready = brief.objective.trim().length > 8;
   const isApi = brief.target === "api-system";
   const signal = hasSignal(brief);
-  const blanks = applicableFields(brief).filter((f) => isEmpty(brief, f));
+  const blanks = applicableFields(effective).filter((f) => isEmpty(brief, f));
   const spark = (f: SuggestField) =>
     canAI ? (
       <Sparkle
@@ -328,7 +345,7 @@ export default function Page() {
 
   /** Save a version (or replace one — auto-fixes overwrite the attempt they fixed). */
   async function pushVersion(text: string, label: string, replaceId?: string) {
-    const missing = missingSections(text, brief);
+    const missing = missingSections(text, effective);
     setViewRef(false); // new output takes the stage; reference stays one click away
     const id = await history.save(brief, text, label, missing, replaceId);
     return { id, missing };
@@ -343,7 +360,7 @@ export default function Page() {
     setStartedAt(Date.now());
     let acc = "";
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ ...body, persona: profile?.persona }), signal: ctrl.signal });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || `Request failed (${r.status})`);
@@ -492,7 +509,7 @@ export default function Page() {
     persistPrefs();
     setBusy("analyze");
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
@@ -564,7 +581,7 @@ export default function Page() {
   }
 
   function instant(clar: Clarification[] = answers) {
-    pushVersion(compileTemplate(brief, clar), `${fw.name} template`);
+    pushVersion(compileTemplate(effective, clar), `${fw.name} template`);
     setStage("forge");
   }
 
@@ -665,7 +682,7 @@ export default function Page() {
                     <label>
                       {simple ? "What kind of task?" : "Task type"} <em>{simple && toolLabel ? `${toolLabel} · ${fw.name}` : fw.name}</em>
                     </label>
-                    <Select ariaLabel="Task type" value={brief.taskType} onChange={(v) => set("taskType", v)} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
+                    <Select ariaLabel="Task type" value={brief.taskType} onChange={changeTaskType} options={TASK_TYPES.map((t) => ({ value: t, label: t }))} />
                   </div>
                 </div>
 
@@ -791,10 +808,12 @@ export default function Page() {
                 <>
                 <div className="row">
                   <div className="field">
-                    <label>Autonomy</label>
-                    <div className="seg">
+                    <label>
+                      Autonomy {!agenticTarget && <em>coding agents only</em>}
+                    </label>
+                    <div className={`seg ${agenticTarget ? "" : "off"}`} aria-disabled={!agenticTarget}>
                       {(["ask-first", "bounded", "autonomous"] as const).map((a) => (
-                        <button key={a} className={brief.autonomy === a ? "on" : ""} onClick={() => set("autonomy", a)}>
+                        <button key={a} className={brief.autonomy === a ? "on" : ""} disabled={!agenticTarget} onClick={() => set("autonomy", a)}>
                           {a === "ask-first" ? "Ask first" : a === "bounded" ? "Bounded" : "Autonomous"}
                         </button>
                       ))}
@@ -886,8 +905,8 @@ export default function Page() {
                           ["examples", "Good/bad examples"],
                         ] as const
                       ).map(([k, l]) => (
-                        <label key={k} className="tog">
-                          <input type="checkbox" checked={brief.extensions[k]} onChange={(e) => setExt(k, e.target.checked)} />
+                        <label key={k} className={`tog ${canEnable(k) ? "" : "off"}`} title={canEnable(k) ? undefined : "Applies to coding agents only"}>
+                          <input type="checkbox" checked={effective.extensions[k]} disabled={!canEnable(k)} onChange={(e) => setExt(k, e.target.checked)} />
                           {l}
                         </label>
                       ))}
