@@ -220,7 +220,14 @@ export default function Page() {
   const simple = mode === "simple";
   const per = personaOf(profile?.persona);
   const nonDev = !!profile && profile.persona !== "developer";
-  const ph = (f: Parameters<typeof placeholderFor>[0]) => placeholderFor(f, brief.taskType, profile?.persona);
+  // Live, objective-tailored examples win; fixed task-type examples are only the fallback.
+  const [hints, setHints] = useState<Partial<Record<string, string>>>({});
+  const hintCache = useRef(new Map<string, Partial<Record<string, string>>>());
+  const ph = (f: Parameters<typeof placeholderFor>[0]) => {
+    const h = hints[f];
+    if (h) return `e.g. ${f === "successCriteria" ? h.replace(/;\s*/g, "\n") : h}`;
+    return placeholderFor(f, brief.taskType, profile?.persona);
+  };
   const presets = simple || nonDev ? SIMPLE_PRESETS : DEV_PRESETS;
   const toolLabel = profile ? TOOLS.find((t) => t.id === profile.tool)?.label : null;
 
@@ -330,6 +337,40 @@ export default function Page() {
         onClick={() => suggest(f)}
       />
     ) : null;
+
+  // Fetch tailored examples ~1.2s after the objective settles (3+ words). Cached per objective + task type.
+  const objectiveKey = brief.objective.trim().replace(/\s+/g, " ").toLowerCase();
+  useEffect(() => {
+    const words = objectiveKey ? objectiveKey.split(" ").length : 0;
+    if (words < 3) return setHints({});
+    if (!canAI) return;
+    const key = `${effective.taskType}|${objectiveKey}`;
+    const cached = hintCache.current.get(key);
+    if (cached) return setHints(cached);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => {
+      fetch("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(accessCode ? { "x-access-code": accessCode } : {}) },
+        body: JSON.stringify({ mode: "hints", brief: { ...brief, objective: brief.objective }, persona: profile?.persona }),
+        signal: ctrl.signal,
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.hints && Object.keys(d.hints).length) {
+            hintCache.current.set(key, d.hints);
+            setHints(d.hints); // keep showing the previous set until a new one arrives (no flicker)
+          }
+        })
+        .catch(() => {});
+    }, 1200);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [objectiveKey, effective.taskType, canAI]);
+  const hintsActive = Object.keys(hints).length > 0;
 
   const headers = useMemo(() => {
     const h: Record<string, string> = { "content-type": "application/json" };
@@ -732,6 +773,7 @@ export default function Page() {
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
                   <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective")} />
+                  {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
                 </div>
 
                 <div className="field">

@@ -16,7 +16,7 @@ import { getViewer } from "@/lib/server/account";
 import { precheck, record } from "@/lib/server/metering";
 import { unitsFor } from "@/lib/plans";
 import { cleanText } from "@/lib/sanitize";
-import { SUGGEST_SYSTEM, applicableFields, hasSignal, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
+import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 import { persona as personaOf } from "@/lib/personas";
 
 export const runtime = "nodejs";
@@ -89,6 +89,7 @@ export async function POST(req: NextRequest) {
   const persona = viewer.profile?.persona ?? body.persona ?? null;
   const brief = normalizeBrief(asBrief(body.brief), persona);
   if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
+  if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints." });
 
   // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest) {
   // Burst limit and quota.
   const auto = body.mode === "refine" && body.auto;
   const units = auto ? 0 : unitsFor(body.mode, brief.chain);
-  const check = await precheck(viewer, units, auto);
+  const check = await precheck(viewer, units, auto, body.mode);
   if (!check.ok) return json(check.status, { error: check.error, code: check.code });
 
   const userText = [brief.objective, brief.context, body.mode === "refine" ? body.feedback : ""].join("\n");
@@ -112,6 +113,8 @@ export async function POST(req: NextRequest) {
 
   const guidance = targetGuidance(brief.target);
   const extra = body.mode === "generate" ? baseExtra : { ...baseExtra, ...fast };
+  // Hints cover every text field; the client shows the ones that are visible and empty.
+  const hintFields = HINT_FIELDS;
   const canary = makeCanary();
 
   let messages: { role: string; content: string }[];
@@ -125,7 +128,14 @@ export async function POST(req: NextRequest) {
     : `KIND OF JOB: ${brief.taskType} — not software. Nothing about code, files, repositories, tests or tooling.`;
   const framing = [who, domain, guidance].filter(Boolean).join("\n\n");
 
-  if (body.mode === "suggest") {
+  if (body.mode === "hints") {
+    stream = false;
+    temperature = 0.6;
+    messages = [
+      { role: "system", content: sys(canary, HINTS_SYSTEM) },
+      { role: "user", content: `${who}\n\n${untrusted("brief", hintsRequest(brief, hintFields))}` },
+    ];
+  } else if (body.mode === "suggest") {
     stream = false;
     temperature = 0.5;
     messages = [
@@ -165,14 +175,14 @@ export async function POST(req: NextRequest) {
         stream,
         temperature,
         // Ceilings: reasoning models spend hidden tokens first, but providers reserve credit against max_tokens.
-        max_tokens: body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : brief.chain ? 10000 : 6000,
+        max_tokens: body.mode === "hints" ? 1500 : body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : brief.chain ? 10000 : 6000,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),
     });
 
   let upstream: Response;
   try {
-    const jsonOut = body.mode === "analyze" || body.mode === "suggest";
+    const jsonOut = body.mode === "analyze" || body.mode === "suggest" || body.mode === "hints";
     upstream = await call(jsonOut);
     // Some models reject response_format — retry once without it (prompt already demands JSON).
     if (!upstream.ok && jsonOut && upstream.status === 400) upstream = await call(false);
@@ -201,6 +211,20 @@ export async function POST(req: NextRequest) {
       return json(422, { error: "That request couldn't be processed." });
     }
     const cleaned = rawOut.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+    if (body.mode === "hints") {
+      try {
+        const p = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
+        const src = p?.hints && typeof p.hints === "object" ? p.hints : p;
+        const hints: Record<string, string> = {};
+        for (const f of hintFields) {
+          const v = cleanText(src?.[f], 160).replace(/\s+/g, " ").replace(/…$/, "").trim();
+          if (v) hints[f] = v;
+        }
+        return json(200, { hints });
+      } catch {
+        return json(200, { hints: {} });
+      }
+    }
     if (body.mode === "suggest") {
       const values = parseSuggestions(cleaned, suggestFields);
       if (!Object.keys(values).length)

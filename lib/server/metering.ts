@@ -12,17 +12,23 @@ const mem = new Map<string, number[]>();
  * Enforce burst rate limit, auto-repair allowance and the plan quota before an AI call.
  * DB-backed so limits hold across serverless instances.
  */
-export async function precheck(v: Viewer, units: number, auto: boolean): Promise<Check> {
+/** Live hints fire as people type: their own budget, so they never block a real generation. */
+const HINTS_PER_10M = 40;
+
+export async function precheck(v: Viewer, units: number, auto: boolean, mode?: string): Promise<Check> {
   const plan = PLANS[v.plan];
+  const hints = mode === "hints";
+  const limit = hints ? HINTS_PER_10M : plan.burstPer10m;
   const prisma = db();
   const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000);
 
   if (!prisma) {
     const now = Date.now();
-    const arr = (mem.get(v.subject) ?? []).filter((t) => now - t < 600_000);
+    const memKey = hints ? `${v.subject}:hints` : v.subject;
+    const arr = (mem.get(memKey) ?? []).filter((t) => now - t < 600_000);
     arr.push(now);
-    mem.set(v.subject, arr);
-    return arr.length > plan.burstPer10m ? { ok: false, status: 429, error: "Too many requests. Try again in a few minutes.", code: "burst" } : { ok: true };
+    mem.set(memKey, arr);
+    return arr.length > limit ? { ok: false, status: 429, error: "Too many requests. Try again in a few minutes.", code: "burst" } : { ok: true };
   }
 
   const recent = await prisma.usageEvent.groupBy({
@@ -31,8 +37,8 @@ export async function precheck(v: Viewer, units: number, auto: boolean): Promise
     _count: { _all: true },
     _sum: { units: true },
   });
-  const calls = recent.reduce((n, r) => n + r._count._all, 0);
-  if (calls >= plan.burstPer10m) return { ok: false, status: 429, error: "Too many requests. Try again in a few minutes.", code: "burst" };
+  const calls = recent.filter((r) => (r.mode === "hints") === hints).reduce((n, r) => n + r._count._all, 0);
+  if (calls >= limit) return { ok: false, status: 429, error: "Too many requests. Try again in a few minutes.", code: "burst" };
 
   if (auto) {
     // Free auto-repairs are only allowed in proportion to paid calls — stops clients flagging everything as "auto".

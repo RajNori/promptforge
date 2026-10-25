@@ -1,7 +1,6 @@
 // Field guidance — shared by the UI tooltips and the AI field-suggest endpoint.
 
 import { resolveFramework, type Brief } from "./forge";
-import { placeholderFor, type PhField } from "./placeholders";
 import type { PersonaId } from "./personas";
 
 export type SuggestField =
@@ -134,7 +133,7 @@ export const SUGGEST_SYSTEM = `You are a principal prompt engineer helping a use
 
 Rules:
 - Ground every value in what the brief already says (objective, context, task type, the user's role, other fields). Never contradict it.
-- Write for THIS task's domain. The style examples show length and shape only — never copy their subject matter (e.g. no code, repos or tests for a children's book).
+- The OBJECTIVE is the source of truth. Every value must be recognisably about it (a children's book gets ages, read-aloud, illustrations — never blogs, finance or code). If a value could belong to a different task, rewrite it.
 - Never invent facts the user hasn't given: names, characters, plots, brands, prices, dates, page counts, numbers. Where a specific detail is needed but unknown, write a fill-in in square brackets with a short hint, e.g. "[age range, e.g. 4–6]" or "[main character's name]".
 - Prefer sensible, widely-true defaults for the domain over guesses, and keep the user's own wording.
 - Keep values tight: role/tone/audience ≤ 20 words; objective/context/deliverable ≤ 2 sentences; response format ≤ 2 sentences.
@@ -146,25 +145,40 @@ Rules:
 
 Respond with ONLY valid JSON, no prose, no code fences.`;
 
-const PH_FIELDS = new Set<string>(["role", "objective", "context", "audience", "tone", "deliverable", "successCriteria", "inputs", "outputFormat"]);
-
-/** Style example for a field, matched to the task type (and the user's role) — never a developer example for a writing task. */
-function styleExample(f: SuggestField, b: Brief, persona?: PersonaId | null): string {
-  if (f === "rules") return `${placeholderFor("rule", b.taskType, persona)} — because ${placeholderFor("why", b.taskType, persona).replace(/\s*\(optional\)$/, "")}`;
-  if (PH_FIELDS.has(f)) return placeholderFor(f as PhField, b.taskType, persona);
-  return FIELD_HELP[f].good;
-}
-
 export function suggestRequest(b: Brief, fields: SuggestField[], persona?: PersonaId | null): string {
+  void persona;
   const shape: Record<string, string> = {};
   for (const f of fields) shape[f] = f === "rules" ? '[{"rule": "...", "why": "..."}]' : '"..."';
-  return `FIELDS TO WRITE:\n${fields
+  return `THE TASK (source of truth): ${b.objective.trim() || "(see context)"}\n\nFIELDS TO WRITE:\n${fields
     .map((f) => {
       const h = FIELD_HELP[f];
       const cur = f === "rules" ? b.rules.filter((r) => r.rule.trim()).map((r) => `${r.rule} — ${r.why}`).join("; ") : String(b[f] ?? "");
-      return `- ${f} (${h.label}): ${h.tip} Style example (shape only, different task): ${styleExample(f, b, persona)}${cur.trim() ? `\n  CURRENT VALUE (improve it): ${cur}` : ""}`;
+      return `- ${f} (${h.label}): ${h.tip}${cur.trim() ? `\n  CURRENT VALUE (improve it): ${cur}` : ""}`;
     })
     .join("\n")}\n\nReturn JSON exactly in this shape: {${Object.entries(shape)
     .map(([k, v]) => `"${k}": ${v}`)
     .join(", ")}}`;
+}
+
+
+// ---------------------------------------------------------------- Live field hints (placeholders tailored to the objective)
+
+/** Fields that get live example placeholders. */
+export const HINT_FIELDS = ["role", "context", "audience", "tone", "deliverable", "successCriteria", "rule", "why", "inputs", "outputFormat"] as const;
+export type HintField = (typeof HINT_FIELDS)[number];
+
+export const HINTS_SYSTEM = `You write short EXAMPLE placeholders that show a person what a good answer to each form field looks like for THEIR task. They are greyed-out hints, not answers.
+
+Rules:
+- Every hint must be recognisably about the person's objective. A children's book gets reader ages, read-aloud, page count, illustrations; a cold email gets prospects, offer, CTA. Never generic, never about a different domain.
+- Concrete and illustrative: realistic example values are fine because they are clearly examples.
+- Each hint ≤ 14 words, no trailing ellipsis. successCriteria: 2 short checks separated by "; ". rule: a short rule; why: its reason (≤ 8 words, no "because").
+- Software, files or tooling only if the objective is software work.
+- Respond with ONLY valid JSON: {"hints": {"<field>": "<hint>", ...}} with every requested field.`;
+
+export function hintsRequest(b: Brief, fields: readonly HintField[]): string {
+  return `OBJECTIVE: ${b.objective.trim()}
+TASK TYPE: ${b.taskType}
+${b.context.trim() ? `CONTEXT SO FAR: ${b.context.trim().slice(0, 600)}\n` : ""}FIELDS: ${fields.join(", ")}
+(role = the expert the AI should act as; context = background the AI needs; audience = who it's for; tone = how it should sound; deliverable = what to hand back; successCriteria = how to judge it; rule/why = one must-do or don't and its reason; inputs = material the person can provide; outputFormat = structure and length of the answer)`;
 }

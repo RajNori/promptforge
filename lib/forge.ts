@@ -87,8 +87,9 @@ export const TASK_TYPES = [
 
 export const EMPTY_BRIEF: Brief = {
   framework: "auto",
-  target: "claude-code",
-  taskType: "Build a feature",
+  // Neutral default: most visitors aren't developers. Developers get their agent target from their profile.
+  target: "chat-llm",
+  taskType: "Other",
   objective: "",
   role: "",
   context: "",

@@ -380,3 +380,4 @@ textarea.mono { font-family: var(--mono); font-size: 12px; }
 .seg.off { opacity: .45; }
 .seg.off button { cursor: not-allowed; }
 .tog.off { opacity: .45; cursor: not-allowed; }
+.hint-note { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: var(--accent-fg); font-size: 12px; animation: rise .3s ease-out; }
