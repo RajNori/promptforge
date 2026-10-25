@@ -13,7 +13,7 @@ const bool = z.preprocess((v) => v === true, z.boolean());
 
 const BriefSchema = z.object({
   framework: z.enum(["auto", ...FRAMEWORK_ORDER] as [string, ...string[]]).catch("auto"),
-  target: z.enum(TARGETS.map((t) => t.id) as [string, ...string[]]).catch("claude-code"),
+  target: z.enum(TARGETS.map((t) => t.id) as [string, ...string[]]).catch("chat-llm"),
   taskType: z.enum(TASK_TYPES as unknown as [string, ...string[]]).catch("Other"),
   objective: txt(LIMITS.objective),
   role: txt(LIMITS.short),

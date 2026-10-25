@@ -16,6 +16,17 @@ const csp = [
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // The old Vercel address permanently forwards to the canonical domain (keeps links and SEO).
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "risen-forge.vercel.app" }],
+        destination: "https://betterpromptgenerator.online/:path*",
+        permanent: true,
+      },
+    ];
+  },
   async headers() {
     return [
       {
