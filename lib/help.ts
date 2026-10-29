@@ -140,6 +140,8 @@ Rules:
 - Success criteria: 3–5 lines, one testable check per line, each ≤ 18 words, no bullets or numbering, no "verified by…" instructions.
 - Rules: 3–5 items; rule ≤ 14 words; why ≤ 12 words, stating the consequence it prevents.
 - If a field already has a value, return an improved version that keeps the user's intent and specifics.
+- When improving the OBJECTIVE itself: keep its subject, genre and intent exactly (a children's book stays a children's book); only sharpen wording, scope and the outcome. Never switch topic.
+- If other fields describe a different topic from the objective, they are stale leftovers: ignore them and follow the objective.
 - You MUST return every requested key. Never omit a key.
 - Never invent secrets, credentials, or personal data.
 

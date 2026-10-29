@@ -9,6 +9,7 @@ import {
   targetGuidance,
   normalizeBrief,
   isEngineering,
+  EMPTY_BRIEF,
   type Brief,
 } from "@/lib/forge";
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
@@ -136,11 +137,19 @@ export async function POST(req: NextRequest) {
       { role: "user", content: `${who}\n\n${untrusted("brief", hintsRequest(brief, hintFields))}` },
     ];
   } else if (body.mode === "suggest") {
+    const improvingObjective = suggestFields.length === 1 && suggestFields[0] === "objective" && !!brief.objective.trim();
     stream = false;
     temperature = 0.5;
     messages = [
       { role: "system", content: sys(canary, SUGGEST_SYSTEM) },
-      { role: "user", content: `${framing}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields, persona)}` },
+      {
+        role: "user",
+        // Improving a typed objective: send only the objective. Leftover fields (e.g. from an earlier template)
+        // must never pull the user's task toward a different topic.
+        content: improvingObjective
+          ? `${framing}\n\n${suggestRequest({ ...EMPTY_BRIEF, taskType: brief.taskType, target: brief.target, objective: brief.objective }, suggestFields, persona)}`
+          : `${framing}\n\nCURRENT BRIEF:\n${untrusted("brief", briefToText(brief))}\n\n${suggestRequest(brief, suggestFields, persona)}`,
+      },
     ];
   } else if (body.mode === "analyze") {
     stream = false;
