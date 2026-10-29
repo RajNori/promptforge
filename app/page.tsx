@@ -195,6 +195,9 @@ export default function Page() {
   const [viewRef, setViewRef] = useState(false);
   type ToastAction = { label: string; run: () => void; primary?: boolean };
   const [toast, setToast] = useState<{ msg: string; actions: ToastAction[] } | null>(null);
+  // The template the current brief was loaded from, so we can spot its leftovers once the objective moves on.
+  const [fromTemplate, setFromTemplate] = useState<{ name: string; brief: Brief } | null>(null);
+  const [driftDismissed, setDriftDismissed] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { me, refresh: refreshMe } = useMe();
   const onHistoryError = useCallback((msg: string) => showToast(msg), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -375,6 +378,30 @@ export default function Page() {
   }, [hintKey, canAI]);
   const hintsActive = Object.keys(hints).length > 0;
 
+  // Nudge 1: objective has moved to a different topic but other fields are still the template's.
+  const staleTemplateFields = (() => {
+    if (!fromTemplate || driftDismissed) return [] as string[];
+    const words = (t: string) => new Set(t.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+    const a = words(brief.objective), b = words(fromTemplate.brief.objective);
+    if (!a.size) return [];
+    const shared = [...a].filter((w) => b.has(w)).length;
+    if (shared / Math.min(a.size, b.size || 1) >= 0.3) return [];
+    const keys = ["context", "audience", "tone", "deliverable", "successCriteria", "role", "inputs", "outputFormat"] as const;
+    const stale: string[] = keys.filter((k) => String(brief[k] ?? "").trim() && brief[k] === fromTemplate.brief[k]).map((k) => FIELD_HELP[k]?.label ?? k);
+    if (brief.rules.some((r) => r.rule.trim()) && JSON.stringify(brief.rules) === JSON.stringify(fromTemplate.brief.rules)) stale.push("Rules");
+    return stale;
+  })();
+  // Nudge 2: a prompt is finished — invite the next one.
+  const doneNudge = stage === "forge" && !!current && !streamingNow && !busy;
+  const nudgeNew = staleTemplateFields.length > 0 || doneNudge;
+
+  /** Start fresh but keep what the user just typed as the objective. */
+  function freshKeepObjective() {
+    const objective = brief.objective;
+    newPrompt(profileDefaults(profile), "Cleared the template's fields — kept your objective");
+    setBrief((b) => ({ ...b, objective }));
+  }
+
   const headers = useMemo(() => {
     const h: Record<string, string> = { "content-type": "application/json" };
     if (accessCode) h["x-access-code"] = accessCode;
@@ -488,7 +515,10 @@ export default function Page() {
   }
 
   function loadTemplate(t: Template) {
-    setBrief(templateBrief(t, profile));
+    const tb = templateBrief(t, profile);
+    setBrief(tb);
+    setFromTemplate({ name: t.name, brief: tb });
+    setDriftDismissed(false);
     setAnalysis(null);
     setAnswers([]);
     setStage("brief");
@@ -509,6 +539,8 @@ export default function Page() {
       setViewRef(true);
     }
     history.reset();
+    setFromTemplate(null);
+    setDriftDismissed(false);
     setBrief({ ...EMPTY_BRIEF, ...defaults });
     setAnalysis(null);
     setAnswers([]);
@@ -540,6 +572,7 @@ export default function Page() {
   async function openProject(id: string) {
     const b = await history.open(id);
     if (b) {
+      setFromTemplate(null);
       setBrief(migrateBrief(b));
       setAnalysis(null);
       setAnswers([]);
@@ -704,8 +737,13 @@ export default function Page() {
                 ))}
               </div>
               <TemplateMenu onPick={loadTemplate} profile={profile} onPersona={changePersona} />
-              <button className="btn ghost sm" onClick={() => newPrompt()} title="Start a new prompt">
-                New
+              <button
+                className={`btn primary sm new-cta${nudgeNew ? " nudge" : ""}`}
+                onClick={() => newPrompt()}
+                title={doneNudge ? "Done with this one? Start the next prompt" : "Start a new prompt from a clean slate"}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
+                New prompt
               </button>
             </div>
           </div>
@@ -777,6 +815,18 @@ export default function Page() {
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
                   <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective")} />
                   {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
+                  {staleTemplateFields.length > 0 && (
+                    <div className="nudge-card" role="status">
+                      <div>
+                        <b>New topic, old details?</b> {staleTemplateFields.slice(0, 3).join(", ")}
+                        {staleTemplateFields.length > 3 ? ` and ${staleTemplateFields.length - 3} more` : ""} still come from the &ldquo;{fromTemplate!.name}&rdquo; template.
+                      </div>
+                      <div className="nudge-actions">
+                        <button className="btn primary sm" onClick={freshKeepObjective}>Start fresh, keep my objective</button>
+                        <button className="btn ghost sm" onClick={() => setDriftDismissed(true)}>Keep them</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="field">
