@@ -221,7 +221,8 @@ export default function Page() {
   const per = personaOf(profile?.persona);
   const nonDev = !!profile && profile.persona !== "developer";
   // Live, objective-tailored examples win; fixed task-type examples are only the fallback.
-  const [hints, setHints] = useState<Partial<Record<string, string>>>({});
+  // Tagged with the objective they were generated for, so a stale set never shows against a new objective.
+  const [hintSet, setHints] = useState<{ key: string; v: Partial<Record<string, string>> }>({ key: "", v: {} });
   const hintCache = useRef(new Map<string, Partial<Record<string, string>>>());
   const ph = (f: Parameters<typeof placeholderFor>[0]) => {
     const h = hints[f];
@@ -340,13 +341,15 @@ export default function Page() {
 
   // Fetch tailored examples ~1.2s after the objective settles (3+ words). Cached per objective + task type.
   const objectiveKey = brief.objective.trim().replace(/\s+/g, " ").toLowerCase();
+  const hintKey = `${effective.taskType}|${objectiveKey}`;
+  // Failed or in-flight requests fall back to the static task-type placeholders instead of a previous objective's examples.
+  const hints = hintSet.key === hintKey ? hintSet.v : {};
   useEffect(() => {
     const words = objectiveKey ? objectiveKey.split(" ").length : 0;
-    if (words < 3) return setHints({});
-    if (!canAI) return;
-    const key = `${effective.taskType}|${objectiveKey}`;
+    if (words < 3 || !canAI) return setHints({ key: "", v: {} });
+    const key = hintKey;
     const cached = hintCache.current.get(key);
-    if (cached) return setHints(cached);
+    if (cached) return setHints({ key, v: cached });
     const ctrl = new AbortController();
     const t = setTimeout(() => {
       fetch("/api/generate", {
@@ -359,7 +362,7 @@ export default function Page() {
         .then((d) => {
           if (d?.hints && Object.keys(d.hints).length) {
             hintCache.current.set(key, d.hints);
-            setHints(d.hints); // keep showing the previous set until a new one arrives (no flicker)
+            setHints({ key, v: d.hints }); // only rendered while this objective is current
           }
         })
         .catch(() => {});
@@ -369,7 +372,7 @@ export default function Page() {
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [objectiveKey, effective.taskType, canAI]);
+  }, [hintKey, canAI]);
   const hintsActive = Object.keys(hints).length > 0;
 
   const headers = useMemo(() => {
