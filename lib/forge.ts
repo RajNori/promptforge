@@ -440,6 +440,8 @@ What to ask about — the person's intent and content, in their own domain:
 - Taste: tone, length, format, what good looks like, what to avoid.
 - For software tasks only: scope boundaries, environment facts, risky operations, acceptance criteria.
 
+Always make one of your questions ask how they will judge the result: what would make them send it back or reject it, phrased for this task in their own terms (e.g. "What would make you rewrite this email before sending it?"). Skip it only if the brief already lists clear success criteria. This answer becomes the success criteria, so it matters more than any other question.
+
 Never ask about prompt mechanics or tooling — framework, chain steps, autonomy, evidence, files, repositories or how the AI should work. Those are your job, not theirs. Never ask about software, files or code for a non-software task.
 
 Score reflects how well the brief captures the person's intent for THIS kind of task. Gaps are short, plain-language notes about missing intent, written for the person.
@@ -453,7 +455,7 @@ export function generateSystem(b: Brief): string {
 You write production-grade prompts. Rules:
 1. Output ONLY the prompt${b.chain ? " chain" : ""}. No preamble, commentary, closing notes, or code fences around the whole thing.
 2. Fill every section with task-specific content. No placeholders like [X]; if a value must be supplied at runtime use {{UPPER_SNAKE}}.
-3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief.
+3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief. Treat any clarification about what would make the result unacceptable as success criteria and carry it into the acceptance checks.
 4. Never invent FACTS about the user's situation: no names, numbers, dates, times, causes, technical internals or requirements the brief doesn't state. Computing from the facts given is expected (totals, comparisons, conversions). Tell the model the same, and tell it the output must be usable as-is: where a detail is missing, use neutral wording that stays true (e.g. "your line manager", "the support inbox") or state one short assumption — never leave "[to confirm]"-style blanks — because invented specifics end up in the user's real work and blanks make it unusable.
 5. Keep the user's commitments and scope exactly as stated: never strengthen, broaden or soften them (e.g. "not in 2027" must not become "never").
 6. Respect the user's limits on length and format above your own structure. Ask for ONE finished deliverable, not variants or options, unless the user asked for options. Do not ask for extras the user didn't request (assumptions sections, explanations, summaries, worked examples) — because extras push the output past the user's limits and bury what they asked for.
