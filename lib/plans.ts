@@ -5,7 +5,7 @@ export type PlanId = "ANON" | "FREE" | "PRO";
 export const PLANS: Record<PlanId, { name: string; price: string; period: "day" | "month"; aiActions: number; projects: number; burstPer10m: number; blurb: string; features: string[] }> = {
   ANON: {
     name: "Guest",
-    price: "A$0",
+    price: "£0",
     period: "day",
     aiActions: 3,
     projects: 0,
@@ -15,7 +15,7 @@ export const PLANS: Record<PlanId, { name: string; price: string; period: "day" 
   },
   FREE: {
     name: "Free",
-    price: "A$0",
+    price: "£0",
     period: "month",
     aiActions: 30,
     projects: 10,
@@ -25,7 +25,7 @@ export const PLANS: Record<PlanId, { name: string; price: string; period: "day" 
   },
   PRO: {
     name: "Pro",
-    price: "A$15",
+    price: "£8",
     period: "month",
     aiActions: 1000,
     projects: 500,
