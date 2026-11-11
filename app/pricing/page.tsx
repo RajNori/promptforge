@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PLANS, type PlanId } from "@/lib/plans";
+import { GoPro } from "../GoPro";
 
 export const metadata: Metadata = { title: "Pricing", alternates: { canonical: "/pricing" }, description: "Free to start. Pro for people who ship prompts daily." };
 
@@ -40,15 +41,13 @@ export default function Pricing() {
                 </a>
               )}
               {id === "PRO" && (
-                <button className="btn" disabled title="Payments launch shortly">
-                  Coming soon
-                </button>
+                <GoPro source="pricing" price={p.price} />
               )}
             </section>
           );
         })}
       </div>
-      <p className="note">Prices in AUD, GST inclusive. An AI generation is one generate or refine call; chain mode counts as two. Field autofill and brief analysis don&apos;t count.</p>
+      <p className="note">Prices in GBP. An AI generation is one generate or refine call; chain mode counts as two. Field autofill and brief analysis don&apos;t count.</p>
     </main>
   );
 }

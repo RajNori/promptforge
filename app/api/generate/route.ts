@@ -14,7 +14,7 @@ import {
 } from "@/lib/forge";
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
 import { getViewer } from "@/lib/server/account";
-import { precheck, record } from "@/lib/server/metering";
+import { estimateTokens, release, reserve, settle } from "@/lib/server/metering";
 import { unitsFor } from "@/lib/plans";
 import { cleanText } from "@/lib/sanitize";
 import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
@@ -103,11 +103,19 @@ export async function POST(req: NextRequest) {
   }
   if (body.mode === "refine" && (!body.prompt.trim() || !body.feedback.trim())) return json(400, { error: "Prompt and feedback are required." });
 
-  // Burst limit and quota.
+  // Burst limit, quota and daily budget, reserved atomically before the call (refunded if the provider rejects it).
   const auto = body.mode === "refine" && body.auto;
   const units = auto ? 0 : unitsFor(body.mode, brief.chain);
-  const check = await precheck(viewer, units, auto, body.mode);
+  let check: Awaited<ReturnType<typeof reserve>>;
+  try {
+    check = await reserve(viewer, body.mode, units, auto);
+  } catch (e) {
+    // Fail closed: never call the provider without a reservation.
+    console.error("[metering] reserve failed", e);
+    return json(503, { error: "AI generation is temporarily unavailable." });
+  }
   if (!check.ok) return json(check.status, { error: check.error, code: check.code });
+  const reservation = check.id;
 
   const userText = [brief.objective, brief.context, body.mode === "refine" ? body.feedback : ""].join("\n");
   if (suspicious(userText)) console.warn("[guard] suspicious input", { subject: viewer.subject, mode: body.mode });
@@ -182,6 +190,8 @@ export async function POST(req: NextRequest) {
         model,
         messages,
         stream,
+        // Ask for token usage on streams too, so the daily budget sees real numbers (AI_STREAM_USAGE=0 opts out).
+        ...(stream && process.env.AI_STREAM_USAGE !== "0" ? { stream_options: { include_usage: true } } : {}),
         temperature,
         // Ceilings: reasoning models spend hidden tokens first, but providers reserve credit against max_tokens.
         max_tokens: body.mode === "hints" ? 1500 : body.mode === "suggest" ? 5000 : body.mode === "analyze" ? 4000 : brief.chain ? 10000 : 6000,
@@ -197,10 +207,12 @@ export async function POST(req: NextRequest) {
     if (!upstream.ok && jsonOut && upstream.status === 400) upstream = await call(false);
   } catch (e) {
     console.error("[generate] upstream unreachable", e);
+    await release(reservation);
     return json(502, { error: GENERIC_FAIL });
   }
 
   if (!upstream.ok) {
+    await release(reservation);
     // Log the real error server-side only; never leak provider details to the client.
     console.error("[generate] upstream error", upstream.status, (await upstream.text().catch(() => "")).slice(0, 1000));
     if (upstream.status === 429) return json(429, { error: "The AI service is busy. Try again in a moment." });
@@ -208,13 +220,15 @@ export async function POST(req: NextRequest) {
     return json(502, { error: GENERIC_FAIL });
   }
 
-  // Charge only once the provider has accepted the call.
-  const meterMode = auto ? "auto" : body.mode;
+  // The reservation stands once the provider has accepted the call; only the token count is settled below.
+  const inputChars = messages.map((m) => m.content).join("");
 
   if (!stream) {
     const data = await upstream.json().catch(() => null);
-    await record(viewer, meterMode, units, data?.usage?.total_tokens);
     const rawOut: string = data?.choices?.[0]?.message?.content ?? "";
+    let tokensUsed: number = data?.usage?.total_tokens ?? estimateTokens(inputChars, rawOut);
+    // Suggest may make a follow-up call; it settles after that.
+    if (body.mode !== "suggest") await settle(reservation, tokensUsed);
     if (rawOut.includes(canary)) {
       console.error("[guard] canary leak blocked", { subject: viewer.subject, mode: body.mode });
       return json(422, { error: "That request couldn't be processed." });
@@ -262,9 +276,11 @@ export async function POST(req: NextRequest) {
         if (retry?.ok) {
           const d2 = await retry.json().catch(() => null);
           const raw2: string = d2?.choices?.[0]?.message?.content ?? "";
+          tokensUsed += d2?.usage?.total_tokens ?? estimateTokens(inputChars, raw2);
           if (!raw2.includes(canary)) Object.assign(values, parseSuggestions(raw2.replace(/^```(?:json)?\s*|\s*```$/g, "").trim(), missing));
         }
       }
+      await settle(reservation, tokensUsed);
       if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
       return json(200, { values });
     }
@@ -331,7 +347,7 @@ export async function POST(req: NextRequest) {
         failed = true;
         console.error("[generate] stream read failed", e);
       } finally {
-        await record(viewer, meterMode, units, tokens);
+        await settle(reservation, tokens ?? estimateTokens(inputChars, full));
         let status: string | null = null;
         if (!failed && finish) {
           status = finish === "length" ? "len" : "ok";

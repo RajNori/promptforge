@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const csp = [
   "default-src 'self'",
@@ -33,4 +34,10 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// Browser errors go through a same-origin tunnel (/monitoring), so the CSP needs no third-party origin.
+// Source maps upload only when SENTRY_AUTH_TOKEN, SENTRY_ORG and SENTRY_PROJECT are set.
+export default withSentryConfig(nextConfig, {
+  tunnelRoute: "/monitoring",
+  silent: !process.env.CI,
+  sourcemaps: { disable: !process.env.SENTRY_AUTH_TOKEN },
+});

@@ -30,6 +30,7 @@ model User {
   sessions Session[]
   projects Project[]
   usage    UsageEvent[]
+  intents  ProIntent[]
 }
 
 model Account {
@@ -116,4 +117,22 @@ model UsageEvent {
   user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([subject, createdAt])
+  /// Site-wide daily token budget.
+  @@index([createdAt])
+}
+
+/// Purchase-intent signal: a click on a "Go Pro" button while payments aren't live (fake door).
+model ProIntent {
+  id        String   @id @default(cuid())
+  /// Same key as UsageEvent.subject, so intent can be joined to usage.
+  subject   String
+  userId    String?
+  /// Where the click happened: pricing | menu | quota.
+  source    String
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([subject, createdAt])
+  @@index([createdAt])
 }
