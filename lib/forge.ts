@@ -212,7 +212,7 @@ export const FRAMEWORKS: Record<FrameworkId, Framework> = {
       { label: "Insight", from: ["context", "inputs", "audience"], guide: "background insight, market/user context, stakeholders" },
       { label: "Statement", from: ["objective", "deliverable", "successCriteria", "rules"], guide: "what exactly to produce, criteria, constraints with reasons" },
       { label: "Personality", from: ["tone"], guide: "voice and stance of the response" },
-      { label: "Experiment", from: ["outputFormat"], guide: "how many distinct alternatives/variants to produce and how to compare them" },
+      { label: "Experiment", from: ["outputFormat"], guide: "the options to weigh before committing to one recommendation; ask for multiple variants only if the user asked for options" },
     ],
   },
   bab: {
@@ -453,9 +453,12 @@ export function generateSystem(b: Brief): string {
 You write production-grade prompts. Rules:
 1. Output ONLY the prompt${b.chain ? " chain" : ""}. No preamble, commentary, closing notes, or code fences around the whole thing.
 2. Fill every section with task-specific content. No placeholders like [X]; if a value must be supplied at runtime use {{UPPER_SNAKE}}.
-3. Infer expert defaults for anything not given; never contradict the brief.
-4. Dense and precise: every line must change model behaviour. Cut generic filler unless made concrete.
-5. Match depth: lean ≈ 150–300 words, standard ≈ 300–700, exhaustive ≈ 700–1400${b.chain ? " (per prompt in the chain, roughly halve these)" : ""}.
+3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief.
+4. Never invent FACTS about the user's situation: no names, numbers, dates, times, causes, technical internals or requirements the brief doesn't state. Computing from the facts given is expected (totals, comparisons, conversions). Tell the model the same, and tell it the output must be usable as-is: where a detail is missing, use neutral wording that stays true (e.g. "your line manager", "the support inbox") or state one short assumption — never leave "[to confirm]"-style blanks — because invented specifics end up in the user's real work and blanks make it unusable.
+5. Keep the user's commitments and scope exactly as stated: never strengthen, broaden or soften them (e.g. "not in 2027" must not become "never").
+6. Respect the user's limits on length and format above your own structure. Ask for ONE finished deliverable, not variants or options, unless the user asked for options. Do not ask for extras the user didn't request (assumptions sections, explanations, summaries, worked examples) — because extras push the output past the user's limits and bury what they asked for.
+7. Dense and precise: every line must change model behaviour. Cut generic filler unless made concrete.
+8. Match depth: lean ≈ 150–300 words, standard ≈ 300–700, exhaustive ≈ 700–1400${b.chain ? " (per prompt in the chain, roughly halve these)" : ""}.
 
 ${contract(b)}`;
 }
