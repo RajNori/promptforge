@@ -611,7 +611,8 @@ export default function Page() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
-      setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: "" })));
+      // Suggested answers are pre-filled so the user can accept or edit; facts only they know come back empty.
+      setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: q.suggestion ?? "" })));
       if (!d.questions?.length) {
         setBusy(null);
         await generate([]);
@@ -1099,7 +1100,10 @@ export default function Page() {
                 {answers.map((q, i) => (
                   <div className="q" key={i}>
                     <p>{q.question}</p>
-                    <small>{q.why}</small>
+                    <small>
+                      {q.why}
+                      {q.suggestion && q.answer === q.suggestion ? " · suggested answer, edit it if it's not right" : ""}
+                    </small>
                     <input
                       type="text"
                       value={q.answer}

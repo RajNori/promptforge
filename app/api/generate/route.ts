@@ -16,7 +16,7 @@ import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicio
 import { getViewer } from "@/lib/server/account";
 import { estimateTokens, release, reserve, settle } from "@/lib/server/metering";
 import { unitsFor } from "@/lib/plans";
-import { cleanText } from "@/lib/sanitize";
+import { LIMITS, cleanText } from "@/lib/sanitize";
 import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
 import { persona as personaOf } from "@/lib/personas";
 
@@ -288,7 +288,11 @@ export async function POST(req: NextRequest) {
       const p = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
       const q = (Array.isArray(p.questions) ? p.questions : [])
         .slice(0, 4)
-        .map((x: { question?: unknown; why?: unknown }) => ({ question: cleanText(x?.question, 500), why: cleanText(x?.why, 300) }))
+        .map((x: { question?: unknown; why?: unknown; suggestion?: unknown }) => ({
+          question: cleanText(x?.question, 500),
+          why: cleanText(x?.why, 300),
+          suggestion: cleanText(x?.suggestion, LIMITS.answer),
+        }))
         .filter((x: { question: string }) => x.question);
       return json(200, {
         score: Math.max(0, Math.min(100, Number(p.score) || 0)),
