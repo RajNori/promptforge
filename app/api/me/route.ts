@@ -2,13 +2,14 @@ import { authEnabled, enabledProviders } from "@/auth";
 import { getViewer, usageSummary } from "@/lib/server/account";
 import { hasDb } from "@/lib/server/db";
 import { PLANS } from "@/lib/plans";
+import { aiActionsFor } from "@/lib/server/limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const v = await getViewer(req);
-  const usage = await usageSummary(v).catch((e) => (console.error("[me] usage lookup failed", e), { used: 0, limit: PLANS[v.plan].aiActions, resetsAt: null, metered: false }));
+  const usage = await usageSummary(v).catch((e) => (console.error("[me] usage lookup failed", e), { used: 0, limit: aiActionsFor(v.plan), resetsAt: null, metered: false }));
   return Response.json(
     {
       user: v.userId ? { name: v.name, email: v.email, image: v.image } : null,
