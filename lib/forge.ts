@@ -592,6 +592,8 @@ function compileOne(b: Brief, fw: Framework, clarifications: Clarification[]): s
     switch (ext.label) {
       case "Examples": {
         const ex = activeExamples(b);
+        // No examples given: leave the section out rather than ship {{…}} blanks the user has to notice and fill.
+        if (!ex.length) break;
         const body = ex.length
           ? `<examples>\n${ex.map((e) => `<example>\n<input>\n${e.input.trim()}\n</input>\n<output>\n${e.output.trim()}\n</output>\n</example>`).join("\n")}\n</examples>`
           : "<examples>\n<example>{{GOOD_EXAMPLE}}</example>\n<example>{{BAD_EXAMPLE — and why it fails}}</example>\n</examples>";
@@ -599,7 +601,7 @@ function compileOne(b: Brief, fw: Framework, clarifications: Clarification[]): s
         break;
       }
       case "Acceptance Criteria":
-        parts.push(section(ext.label, b.successCriteria ? bullets(b.successCriteria).replace(/^- /gm, "- [ ] ") : "- [ ] {{ACCEPTANCE_CRITERIA}}"));
+        parts.push(section(ext.label, b.successCriteria ? bullets(b.successCriteria).replace(/^- /gm, "- [ ] ") : `- [ ] ${b.objective.trim().replace(/\.$/, "")}: done as asked, nothing out of scope\n- [ ] Every completion claim is backed by evidence (command output, test results or file paths)`));
         break;
       case "Authority Boundaries":
         parts.push(
