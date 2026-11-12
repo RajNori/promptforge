@@ -1064,7 +1064,7 @@ export default function Page() {
                   <button className="btn ghost" disabled={!ready || !!busy} onClick={() => instant()}>
                     {simple ? "Quick draft (no AI)" : "Instant template"}
                   </button>
-                  {canAI && !asking && (
+                  {canAI && (
                     <button
                       className={`btn ghost ai ${sparking === "all" ? "busy" : ""}`}
                       disabled={!signal || !blanks.length || !!sparking || !!busy}
