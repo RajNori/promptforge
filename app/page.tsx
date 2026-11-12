@@ -173,6 +173,23 @@ const X = (
   </svg>
 );
 
+/**
+ * Ask-first for one-sentence briefs. On by default; NEXT_PUBLIC_ASK_FIRST=0 turns it off for everyone.
+ * `?ask=1` / `?ask=0` overrides it for one browser (remembered), so testers can be opted in or out by link.
+ */
+function useAskFirst(): boolean {
+  const [on, setOn] = useState(process.env.NEXT_PUBLIC_ASK_FIRST !== "0");
+  useEffect(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get("ask");
+      if (q === "1" || q === "0") localStorage.setItem("risen-forge:ask", q);
+      const v = localStorage.getItem("risen-forge:ask");
+      if (v === "1" || v === "0") setOn(v === "1");
+    } catch {}
+  }, []);
+  return on;
+}
+
 export default function Page() {
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF);
   const [stage, setStage] = useState<Stage>("brief");
@@ -221,6 +238,7 @@ export default function Page() {
     if (profile) saveProfile({ ...profile, mode: m });
   };
   const simple = mode === "simple";
+  const askFirst = useAskFirst();
   const per = personaOf(profile?.persona);
   const nonDev = !!profile && profile.persona !== "developer";
   // Live, objective-tailored examples win; fixed task-type examples are only the fallback.
@@ -331,6 +349,9 @@ export default function Page() {
   const isApi = brief.target === "api-system";
   const signal = hasSignal(brief);
   const blanks = applicableFields(effective).filter((f) => isEmpty(brief, f));
+  // One-sentence brief: ask, don't auto-fill. Auto-fill guesses the facts only the user knows (eval: 47% of
+  // success criteria met vs 91% after asking), so the questions become the way to fill the gaps.
+  const asking = askFirst && !!canAI && !brief.context.trim() && !brief.successCriteria.trim();
   const spark = (f: SuggestField) =>
     canAI ? (
       <Sparkle
@@ -1030,7 +1051,7 @@ export default function Page() {
                         <Spinner /> Analysing brief…
                       </>
                     ) : canAI ? (
-                      "Analyse & ask questions →"
+                      asking ? "Ask me a few questions →" : "Analyse & ask questions →"
                     ) : (
                       "Generate →"
                     )}
@@ -1054,7 +1075,8 @@ export default function Page() {
                     </button>
                   )}
                 </div>
-                {!ready && <p className="note">Write an objective to continue{canAI ? " — or add some context and use ✦ to draft it" : ""}.</p>}
+                {!ready && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
+                {ready && asking && <p className="note">One sentence is enough. Answer a few quick questions and your answers become the context and success criteria.</p>}
               </>
             )}
 
