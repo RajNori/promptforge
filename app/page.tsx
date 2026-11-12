@@ -348,7 +348,10 @@ export default function Page() {
   const ready = brief.objective.trim().length > 8;
   const isApi = brief.target === "api-system";
   const signal = hasSignal(brief);
-  const blanks = applicableFields(effective).filter((f) => isEmpty(brief, f));
+  // Audience/Tone are on screen in Simple mode (or once filled) even when the framework doesn't need them; keep the
+  // fill list and the server's allowed list in step with what's visible, or ✦ on them fails as "Unknown field".
+  const showAudienceTone = simple || fw.usesAudienceTone || !!brief.audience.trim() || !!brief.tone.trim();
+  const blanks = applicableFields(effective, { audienceTone: showAudienceTone }).filter((f) => isEmpty(brief, f));
   // One-sentence brief: ask, don't auto-fill. Auto-fill guesses the facts only the user knows (eval: 47% of
   // success criteria met vs 91% after asking), so the questions become the way to fill the gaps.
   const asking = askFirst && !!canAI && !brief.context.trim() && !brief.successCriteria.trim();
@@ -517,7 +520,7 @@ export default function Page() {
     setSparking(field);
     const prev = brief;
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, persona: profile?.persona }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Suggestion failed");
       refreshMe();
@@ -861,7 +864,7 @@ export default function Page() {
                   <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} />
                 </div>
 
-                {(simple || fw.usesAudienceTone || brief.audience || brief.tone) && (
+                {showAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
