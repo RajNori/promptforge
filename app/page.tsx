@@ -1076,6 +1076,7 @@ export default function Page() {
                     </button>
                   )}
                 </div>
+                {server && !canAI && <p className="note">AI generation isn&apos;t available right now, so this builds a template from your brief. Add context and success criteria for a better result.</p>}
                 {!ready && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
                 {ready && asking && <p className="note">One sentence is enough. Answer a few quick questions and your answers become the context and success criteria.</p>}
               </>
