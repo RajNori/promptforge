@@ -76,6 +76,8 @@ export const BodySchema = z.discriminatedUnion("mode", [
     mode: z.literal("suggest"),
     brief: BriefSchema,
     field: z.enum(["all", ...SUGGEST_FIELDS] as [string, ...string[]]),
+    /** The client shows Audience/Tone for this brief, so they can be filled even if the framework doesn't use them. */
+    audienceTone: bool,
     persona: Persona,
   }),
 ]);

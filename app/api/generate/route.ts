@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
   let suggestFields: SuggestField[] = [];
   if (body.mode === "suggest") {
     if (!hasSignal(brief)) return json(400, { error: "Add an objective or some context first." });
-    const allowed = applicableFields(brief);
+    const allowed = applicableFields(brief, { audienceTone: body.audienceTone });
     const f = body.field as SuggestField | "all";
     suggestFields = f === "all" ? allowed.filter((x) => isEmpty(brief, x)) : allowed.includes(f) ? [f] : [];
     if (!suggestFields.length) return json(400, { error: f === "all" ? "Nothing to fill — all fields have values." : "Unknown field." });
