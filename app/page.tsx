@@ -19,6 +19,8 @@ import {
   type Brief,
   type Clarification,
   type Example,
+  type MissingDetail,
+  withDetails,
   type Rule,
 } from "@/lib/forge";
 import { Select } from "./Select";
@@ -27,6 +29,7 @@ import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
 import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
 import { Onboarding } from "./Onboarding";
+import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
@@ -195,6 +198,9 @@ export default function Page() {
   const [stage, setStage] = useState<Stage>("brief");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [answers, setAnswers] = useState<Clarification[]>([]);
+  /** Missing-details dialog: open with the facts still missing for this analysis; asked once per analysis. */
+  const [detailsAsk, setDetailsAsk] = useState<{ details: MissingDetail[]; clar: Clarification[] } | null>(null);
+  const detailsAsked = useRef<Analysis | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
   const [error, setError] = useState("");
@@ -489,7 +495,7 @@ export default function Page() {
   }
 
   /** Validate the framework contract; auto-repair once if headings are missing. */
-  async function finish(res: string | null, label: string) {
+  async function finish(res: string | null, label: string, b: Brief = brief) {
     if (!res) return;
     const { id, missing } = await pushVersion(res, label);
     if (missing.length) {
@@ -497,7 +503,7 @@ export default function Page() {
       const fixed = await stream({
         mode: "refine",
         auto: true,
-        brief,
+        brief: b,
         prompt: res,
         feedback: `The prompt violates the ${fw.name} output contract. Restore these missing required sections with proper headings, in the correct order, without removing anything else: ${missing.join(", ")}.`,
       });
@@ -614,11 +620,12 @@ export default function Page() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
+      detailsAsked.current = null;
       // Suggested answers are pre-filled so the user can accept or edit; facts only they know come back empty.
       setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: q.suggestion ?? "" })));
       if (!d.questions?.length) {
         setBusy(null);
-        await generate([]);
+        await forge([], d);
         return;
       }
       setStage("clarify");
@@ -629,13 +636,33 @@ export default function Page() {
     }
   }
 
-  async function generate(clar: Clarification[] = answers) {
+  /** Forge after analysis: first ask once for the key facts still missing (name, date…), all optional. */
+  async function forge(clar: Clarification[] = answers, a: Analysis | null = analysis) {
+    const details = a?.details ?? [];
+    if (canAI && a && details.length && detailsAsked.current !== a) {
+      detailsAsked.current = a;
+      setDetailsAsk({ details, clar });
+      return;
+    }
+    await generate(clar);
+  }
+
+  async function addDetails(filled: { label: string; value: string }[]) {
+    const clar = detailsAsk?.clar ?? answers;
+    setDetailsAsk(null);
+    const next = withDetails(brief, filled);
+    // Into the brief itself (Context), so refinements, history and the next forge keep the facts.
+    if (next !== brief) setBrief(next);
+    await generate(clar, next);
+  }
+
+  async function generate(clar: Clarification[] = answers, b: Brief = brief) {
     setError("");
     if (!canAI) return instant(clar);
     persistPrefs();
     setBusy("generate");
     try {
-      await finish(await stream({ mode: "generate", brief, clarifications: clar }), `${fw.name}${brief.chain ? " chain" : ""}`);
+      await finish(await stream({ mode: "generate", brief: b, clarifications: clar }), `${fw.name}${b.chain ? " chain" : ""}`, b);
     } finally {
       setBusy(null);
     }
@@ -1113,14 +1140,14 @@ export default function Page() {
                       value={q.answer}
                       maxLength={LIMITS.answer}
                       onChange={(e) => setAnswers((a) => a.map((x, j) => (j === i ? { ...x, answer: e.target.value } : x)))}
-                      onKeyDown={(e) => e.key === "Enter" && i === answers.length - 1 && generate()}
+                      onKeyDown={(e) => e.key === "Enter" && i === answers.length - 1 && !busy && forge()}
                       placeholder="Answer, or leave blank to let the model decide"
                       autoFocus={i === 0}
                     />
                   </div>
                 ))}
                 <div className="actions">
-                  <button className="btn primary" disabled={!!busy} onClick={() => generate()}>
+                  <button className="btn primary" disabled={!!busy} onClick={() => forge()}>
                     {busy === "generate" ? (
                       <>
                         <Spinner /> Forging…
@@ -1262,6 +1289,18 @@ export default function Page() {
             ×
           </button>
         </div>
+      )}
+      {detailsAsk && (
+        <MissingDetails
+          details={detailsAsk.details}
+          busy={!!busy}
+          onSubmit={addDetails}
+          onSkip={() => {
+            const clar = detailsAsk.clar;
+            setDetailsAsk(null);
+            generate(clar);
+          }}
+        />
       )}
       {(obOpen || needsOnboarding) && (
         <Onboarding

@@ -298,9 +298,13 @@ export async function POST(req: NextRequest) {
         score: Math.max(0, Math.min(100, Number(p.score) || 0)),
         gaps: (Array.isArray(p.gaps) ? p.gaps : []).slice(0, 6).map((g: unknown) => cleanText(g, 300)).filter(Boolean),
         questions: q,
+        details: (Array.isArray(p.details) ? p.details : [])
+          .map((x: { label?: unknown; hint?: unknown }) => ({ label: cleanText(x?.label, 80).trim(), hint: cleanText(x?.hint, 120).trim() }))
+          .filter((x: { label: string }) => x.label)
+          .slice(0, 6),
       });
     } catch {
-      return json(200, { score: 50, gaps: [], questions: [] });
+      return json(200, { score: 50, gaps: [], questions: [], details: [] });
     }
   }
 
