@@ -51,6 +51,8 @@ export interface Clarification {
   question: string;
   why: string;
   answer?: string;
+  /** The model's best-guess answer, pre-filled for the user to accept or edit. Empty for facts only they know. */
+  suggestion?: string;
 }
 
 export interface Analysis {
@@ -444,10 +446,12 @@ Always make one of your questions ask how they will judge the result: what would
 
 Never ask about prompt mechanics or tooling — framework, chain steps, autonomy, evidence, files, repositories or how the AI should work. Those are your job, not theirs. Never ask about software, files or code for a non-software task.
 
+For each question also give a suggested answer the person can accept as-is or edit: the most likely answer for this task, in their voice, one line. Suggest only what a sensible default can cover (tone, length, format, audience type, what would make them reject it). If the answer is a fact only they know (names, numbers, dates, prices, their situation), leave the suggestion empty, because a guessed fact accepted without reading ends up in their real work.
+
 Score reflects how well the brief captures the person's intent for THIS kind of task. Gaps are short, plain-language notes about missing intent, written for the person.
 
 Respond with ONLY valid JSON, no prose, no code fences:
-{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters"}]}`;
+{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}]}`;
 
 export function generateSystem(b: Brief): string {
   return `${PRIMER}
