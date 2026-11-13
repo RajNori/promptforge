@@ -240,11 +240,17 @@ export default function Page() {
     if (profile?.persona === id) return;
     const next: Profile = profile ? { ...profile, persona: id, goals: [] } : { ...defaultProfile(id), mode };
     saveProfile(next);
-    const label = personaOf(id).label.split(" /")[0];
+    followProfile(next, true);
+  }
+
+  /** Make the brief follow a newly saved profile. Empty brief → silently take the role's defaults; content → never touch it, offer a fresh start. */
+  function followProfile(next: Profile, personaChanged: boolean) {
     // Empty brief → silently follow the role's home task (drives framework + placeholders).
     if (!briefHasContent(brief)) return setBrief((b) => ({ ...b, ...profileDefaults(next) }));
+    if (!personaChanged) return;
+    const label = personaOf(next.persona).label.split(" /")[0];
     // Content → never touch it. Offer a fresh start and flag a task mismatch.
-    const mismatch = brief.taskType !== PERSONA_TASK[id] ? ` (still set to ${brief.taskType})` : "";
+    const mismatch = brief.taskType !== PERSONA_TASK[next.persona] ? ` (still set to ${brief.taskType})` : "";
     showToast(
       `Switched to ${label}. Your current brief is kept${mismatch}.`,
       [
@@ -265,10 +271,11 @@ export default function Page() {
   }
 
   function finishOnboarding(p: Profile) {
+    const personaChanged = profile?.persona !== p.persona;
     saveProfile(p);
     setModeState(p.mode);
     setObOpen(false);
-    if (!brief.objective.trim()) setBrief((b) => ({ ...b, ...profileDefaults(p) }));
+    followProfile(p, personaChanged);
   }
 
   useEffect(() => {
@@ -342,9 +349,9 @@ export default function Page() {
       />
     ) : null;
 
-  // Fetch tailored examples ~1.2s after the objective settles (3+ words). Cached per objective + task type.
+  // Fetch tailored examples ~1.2s after the objective settles (3+ words). Cached per persona + task type + objective.
   const objectiveKey = brief.objective.trim().replace(/\s+/g, " ").toLowerCase();
-  const hintKey = `${effective.taskType}|${objectiveKey}`;
+  const hintKey = `${profile?.persona ?? ""}|${effective.taskType}|${objectiveKey}`; // hints are persona-flavoured too
   // Failed or in-flight requests fall back to the static task-type placeholders instead of a previous objective's examples.
   const hints = hintSet.key === hintKey ? hintSet.v : {};
   useEffect(() => {
