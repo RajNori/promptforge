@@ -5,7 +5,7 @@ import { LEVELS, PERSONAS, TOOLS, defaultProfile, modeFor, persona as personaOf,
 
 const STEPS = ["Role", "Goals", "Tool", "Experience"] as const;
 
-/** First-visit setup: role → goals → where you use AI → experience. Skippable; re-openable. */
+/** First-visit setup: role → goals → where you use AI → experience. Skippable (keeps a picked role); re-openable. */
 export function Onboarding({ initial, onDone, onSkip }: { initial: Profile | null; onDone: (p: Profile) => void; onSkip: () => void }) {
   const [step, setStep] = useState(0);
   const [p, setP] = useState<Profile>(initial ?? { ...defaultProfile(), persona: "" as PersonaId });
@@ -15,11 +15,6 @@ export function Onboarding({ initial, onDone, onSkip }: { initial: Profile | nul
     dialog.current?.querySelector<HTMLElement>("button.ob-card, button.ob-chip")?.focus();
   }, [step]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onSkip();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onSkip]);
 
   const per = personaOf(p.persona || undefined);
   const pickPersona = (id: PersonaId) => {
@@ -30,6 +25,16 @@ export function Onboarding({ initial, onDone, onSkip }: { initial: Profile | nul
   };
   const toggleGoal = (g: string) => setP((cur) => ({ ...cur, goals: cur.goals.includes(g) ? cur.goals.filter((x) => x !== g) : [...cur.goals, g].slice(0, 8) }));
   const finish = (level: Level = p.level) => onDone({ ...p, level, mode: modeFor(level, p.persona) });
+  // Skip means "skip the rest", not "undo": once a role is picked, keep it (tool/level fall back to that role's defaults).
+  const skip = () => (p.persona ? finish() : onSkip());
+  const skipRef = useRef(skip);
+  skipRef.current = skip;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && skipRef.current();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="ob-scrim">
@@ -44,7 +49,7 @@ export function Onboarding({ initial, onDone, onSkip }: { initial: Profile | nul
               </li>
             ))}
           </ol>
-          <button className="btn ghost sm" onClick={onSkip}>
+          <button className="btn ghost sm" onClick={skip}>
             Skip
           </button>
         </div>
