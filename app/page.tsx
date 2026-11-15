@@ -27,11 +27,12 @@ import { Select } from "./Select";
 import { AccountBar, useMe } from "./Account";
 import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
-import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { ErrorNote, FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { ACTION_LABEL, RequestError, fromException, fromResponse, fromStreamStatus, readJson, type ErrorAction, type FriendlyError, type Mode as ReqMode } from "@/lib/errors";
 import { Onboarding } from "./Onboarding";
 import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
-import { OBJECTIVE_EXAMPLE, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_FIELD_MSG, UNCLEAR_OBJECTIVE_MSG, isGibberishField, isGibberishObjective, withoutGibberish } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
@@ -194,6 +195,11 @@ function useAskFirst(): boolean {
   return on;
 }
 
+const UNCLEAR = { msg: UNCLEAR_OBJECTIVE_MSG, hint: OBJECTIVE_EXAMPLE };
+
+/** Optional text fields that get the gibberish check (the objective has its own, stricter one). */
+type GibField = "role" | "context" | "audience" | "tone" | "deliverable" | "successCriteria" | "rules" | "inputs" | "outputFormat";
+
 export default function Page() {
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF);
   const [stage, setStage] = useState<Stage>("brief");
@@ -204,11 +210,27 @@ export default function Page() {
   const detailsAsked = useRef<Analysis | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
-  const [error, setError] = useState("");
-  // Inline error on the objective field when it isn't a recognisable task (no prompt is generated).
-  const [objErr, setObjErr] = useState("");
-  useEffect(() => setObjErr(""), [brief.objective]);
+  // A failed request: shown beside the action that failed (brief panel or output panel), with the actions that fix it.
+  const [error, setErrorState] = useState<(FriendlyError & { where: "brief" | "output" }) | null>(null);
+  // Field errors sit under their field: the objective (unclear task, too short…) and the refine request.
+  const [objErr, setObjErr] = useState<{ msg: string; hint?: string } | null>(null);
+  useEffect(() => setObjErr(null), [brief.objective]);
+  // Gibberish in the other fields: flagged once typing pauses, or at once when a Simple-mode run is stopped by it.
+  const [settled, setSettled] = useState<Brief | null>(null);
+  const [gibForced, setGibForced] = useState(false);
+  // Fields left out of the last prompt because they were still mash (Advanced lets people run past the nudge).
+  const [leftOut, setLeftOut] = useState<GibField[]>([]);
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(brief), 900);
+    return () => clearTimeout(t);
+  }, [brief]);
   const [feedback, setFeedback] = useState("");
+  const [feedbackErr, setFeedbackErr] = useState<{ msg: string; hint?: string } | null>(null);
+  useEffect(() => setFeedbackErr(null), [feedback]);
+  /** Re-runs the request that last failed; `b` swaps in an edited brief (e.g. Lean depth). */
+  const lastRun = useRef<((b?: Brief) => void) | null>(null);
+  const objectiveRef = useRef<HTMLTextAreaElement>(null);
+  const feedbackRef = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
   const [accessCode, setAccessCode] = useState("");
@@ -369,6 +391,68 @@ export default function Page() {
   // fill list and the server's allowed list in step with what's visible, or ✦ on them fails as "Unknown field".
   const showAudienceTone = simple || fw.usesAudienceTone || !!brief.audience.trim() || !!brief.tone.trim();
   const blanks = applicableFields(effective, { audienceTone: showAudienceTone }).filter((f) => isEmpty(brief, f));
+  // Only the fields on screen in this mode are judged, so a Simple-mode user is never stopped by a hidden field.
+  const onScreen: GibField[] = ["context", "deliverable", "successCriteria", "rules"];
+  if (showAudienceTone) onScreen.push("audience", "tone");
+  if (!simple) onScreen.push("role", "inputs", "outputFormat");
+  const gibNow = onScreen.filter((f) =>
+    f === "rules" ? brief.rules.some((r) => isGibberishField(r.rule) || isGibberishField(r.why)) : isGibberishField(brief[f]),
+  );
+  // Wait for typing to pause so a half-typed word isn't flagged, unless a run was just stopped by it.
+  const gibFields = gibNow.filter(
+    (f) => gibForced || (f === "rules" ? JSON.stringify(settled?.rules) === JSON.stringify(brief.rules) : settled?.[f] === brief[f]),
+  );
+  useEffect(() => {
+    if (gibForced && !gibNow.length) setGibForced(false);
+  }, [gibForced, gibNow.length]);
+  const objectiveUsable = !!brief.objective.trim() && !isGibberishObjective(brief.objective);
+  /** Blank a flagged field (for Rules, only the rows that are mash). */
+  function clearGib(f: GibField) {
+    if (f === "rules")
+      setBrief((b) => {
+        const kept = b.rules.filter((r) => !isGibberishField(r.rule) && !isGibberishField(r.why));
+        return { ...b, rules: kept.length ? kept : [{ rule: "", why: "" }] };
+      });
+    else set(f, "");
+  }
+  const gibId = (f: GibField) => `${f}-gib`;
+  const gibAria = (f: GibField) => (gibFields.includes(f) ? { "aria-invalid": true, "aria-describedby": gibId(f) } : {});
+  /**
+   * Simple mode: a red line telling the user to say it in plain words (and runs stop until it's fixed).
+   * Advanced mode: a nudge to autofill it from the objective or leave it blank; runs aren't blocked.
+   */
+  const gib = (f: GibField) => {
+    if (!gibFields.includes(f)) return null;
+    const label = f === "rules" && simple ? "Must-dos & don'ts" : FIELD_HELP[f].label;
+    if (simple) {
+      const eg = f === "rules" ? "" : ph(f);
+      return (
+        <div className="err gib-err" id={gibId(f)} role="alert">
+          <span>
+            {UNCLEAR_FIELD_MSG} {eg.startsWith("e.g.") && <span style={{ opacity: 0.85 }}>{eg.split("\n")[0]}</span>}
+          </span>
+          <button className="btn ghost sm" onClick={() => clearGib(f)}>Clear</button>
+        </div>
+      );
+    }
+    const canFill = !!canAI && objectiveUsable;
+    return (
+      <div className="nudge-card" id={gibId(f)} role="status">
+        <div>
+          <b>{label} doesn&apos;t read as words.</b>{" "}
+          {canFill ? "Autofill it from your objective, or leave it blank." : "Leave it blank, or describe it in plain words."}
+        </div>
+        <div className="nudge-actions">
+          {canFill && (
+            <button className="btn primary sm" disabled={!!sparking || !!busy} onClick={() => suggest(f)}>
+              {StarIcon} {sparking === f ? "Filling…" : "Autofill from objective"}
+            </button>
+          )}
+          <button className={`btn ${canFill ? "ghost" : "primary"} sm`} onClick={() => clearGib(f)}>Leave it blank</button>
+        </div>
+      </div>
+    );
+  };
   // One-sentence brief: ask, don't auto-fill. Auto-fill guesses the facts only the user knows (eval: 47% of
   // success criteria met vs 91% after asking), so the questions become the way to fill the gaps.
   const asking = askFirst && !!canAI && !brief.context.trim() && !brief.successCriteria.trim();
@@ -465,10 +549,58 @@ export default function Page() {
 
   /** Loose browser-side pre-check; the server and the model have the final say. */
   function objectiveOk(): boolean {
-    if (!isGibberishObjective(brief.objective)) return true;
-    setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    const badObjective = isGibberishObjective(brief.objective);
+    // Simple mode also stops on mash in the other fields; Advanced users only get the nudge.
+    const badFields = simple && gibNow.length > 0;
+    if (!badObjective && !badFields) return true;
+    if (badObjective) {
+      setObjErr(UNCLEAR);
+      requestAnimationFrame(() => objectiveRef.current?.focus());
+    }
+    if (badFields) {
+      setGibForced(true);
+      // Take the user to the first field to fix.
+      setTimeout(() => document.getElementById(gibId(gibNow[0]))?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    }
     setStage("brief");
     return false;
+  }
+
+  /** Show a request error; field errors go under their field instead of in a panel. */
+  function setError(f: FriendlyError | null, where: "brief" | "output" = "brief") {
+    if (!f) return setErrorState(null);
+    if (f.field === "objective") {
+      setErrorState(null);
+      setStage("brief");
+      setObjErr({ msg: f.msg, hint: f.hint });
+      requestAnimationFrame(() => objectiveRef.current?.focus());
+      return;
+    }
+    if (f.field === "feedback" && current) {
+      setErrorState(null);
+      setFeedbackErr({ msg: f.msg, hint: f.hint });
+      requestAnimationFrame(() => feedbackRef.current?.focus());
+      return;
+    }
+    setErrorState({ ...f, where });
+  }
+
+  function runAction(a: ErrorAction) {
+    setErrorState(null);
+    if (a === "retry") return lastRun.current?.();
+    if (a === "lean") {
+      const nb = { ...brief, depth: "lean" as const };
+      setBrief(nb);
+      return lastRun.current?.(nb);
+    }
+    if (a === "instant") return instant(answers);
+    if (a === "signin") return void (window.location.href = "/signin");
+    if (a === "pro") return void (window.location.href = "/pricing");
+    if (a === "edit-objective") {
+      setStage("brief");
+      return requestAnimationFrame(() => objectiveRef.current?.focus());
+    }
+    if (a === "edit-feedback") return feedbackRef.current?.focus();
   }
 
   async function stream(body: object): Promise<string | null> {
@@ -482,13 +614,13 @@ export default function Page() {
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ ...body, persona: profile?.persona }), signal: ctrl.signal });
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
+        const d = await readJson(r);
         if (d.code === "unclear_objective") {
-          setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+          setObjErr(UNCLEAR);
           setStage("brief");
           return null;
         }
-        throw new Error(d.error || `Request failed (${r.status})`);
+        throw new RequestError(fromResponse(r.status, d, (body as { mode: ReqMode }).mode));
       }
       const reader = r.body!.getReader();
       const dec = new TextDecoder();
@@ -500,21 +632,23 @@ export default function Page() {
         setStreaming(cut < 0 ? acc : acc.slice(0, cut));
       }
       const eot = acc.lastIndexOf("\u0004");
-      if (eot < 0) throw new Error("Generation was cut off before it finished. Try again — or use Lean depth for faster results.");
+      const depth = (body as { brief?: Brief }).brief?.depth ?? brief.depth;
+      if (eot < 0) throw new RequestError(fromStreamStatus("cut", depth));
       const status = acc.slice(eot + 1);
       if (status === "unclear") {
-        setObjErr(UNCLEAR_OBJECTIVE_MSG);
+        setObjErr(UNCLEAR);
         setStage("brief");
         return null;
       }
       const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
-      if (!clean) throw new Error("Empty response. Please try again.");
-      if (status === "blocked") throw new Error("That request couldn't be processed. Rephrase your brief and try again.");
-      if (status === "off") throw new Error("The output didn't follow the prompt format, so it wasn't saved. Try again or rephrase the brief.");
-      if (status === "len") setError("Output hit the length limit and may be incomplete — try Lean depth or turn off chain mode.");
+      if (status === "blocked") throw new RequestError(fromStreamStatus("blocked", depth, (body as { mode: ReqMode }).mode));
+      if (!clean) throw new RequestError(fromStreamStatus("empty", depth));
+      if (status === "off") throw new RequestError(fromStreamStatus("off", depth));
+      if (status === "len") setError(fromStreamStatus("len", depth), "output");
       return clean;
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setError((e as Error).message);
+      const f = fromException(e);
+      if (f) setError(f, "output");
       return null;
     } finally {
       setStreaming("");
@@ -550,14 +684,16 @@ export default function Page() {
 
   async function suggest(field: SuggestField | "all") {
     if (sparking) return;
-    setError("");
+    setError(null);
+    if (!objectiveOk()) return;
     persistPrefs();
     setSparking(field);
     const prev = brief;
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Suggestion failed");
+      const d = await readJson(r);
+      if (!r.ok) throw new RequestError(fromResponse(r.status, d, "suggest"));
+      if (!d.values || typeof d.values !== "object") throw new RequestError(fromResponse(502, { code: "empty_output" }, "suggest"));
       refreshMe();
       const values = d.values as Partial<Brief>;
       const keys = Object.keys(values) as SuggestField[];
@@ -567,7 +703,16 @@ export default function Page() {
       const base = field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`;
       showToast(gaps ? `${base} — replace the ${gaps} [bracketed] detail${gaps === 1 ? "" : "s"} only you know` : field === "all" ? `${base}: ${names.join(", ")}` : base, prev, gaps ? 14000 : 9000);
     } catch (e) {
-      showToast((e as Error).message);
+      const f = fromException(e);
+      if (!f) return;
+      if (f.field === "objective") return setObjErr({ msg: f.msg, hint: f.hint });
+      // Field fills keep the toast (they're small, in-place actions), but say what to do and offer the fix.
+      const acts = f.actions.filter((a) => a === "retry" || a === "signin" || a === "pro");
+      showToast(
+        f.hint ? `${f.msg} ${f.hint}` : f.msg,
+        acts.map((a, i) => ({ label: ACTION_LABEL[a], primary: i === 0, run: () => (a === "retry" ? suggest(field) : runAction(a)) })),
+        12000,
+      );
     } finally {
       setSparking(null);
     }
@@ -604,7 +749,7 @@ export default function Page() {
     setAnalysis(null);
     setAnswers([]);
     setFeedback("");
-    setError("");
+    setError(null);
     setStage("brief");
     if (!hadWork) return;
     showToast(
@@ -640,31 +785,35 @@ export default function Page() {
   }
 
   async function analyze() {
-    setError("");
+    setError(null);
+    lastRun.current = () => analyze();
     if (!objectiveOk()) return;
+    setLeftOut(gibNow);
     if (!canAI) return instant();
     persistPrefs();
     setBusy("analyze");
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
-      const d = await r.json();
-      if (d?.code === "unclear_objective") {
-        setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+      const d = await readJson(r);
+      if (d.code === "unclear_objective") {
+        setObjErr(UNCLEAR);
         return;
       }
-      if (!r.ok) throw new Error(d.error || "Analysis failed");
-      setAnalysis(d);
+      if (!r.ok) throw new RequestError(fromResponse(r.status, d, "analyze"));
+      if (!Array.isArray(d.questions)) throw new RequestError(fromResponse(502, { code: "empty_output" }, "analyze"));
+      setAnalysis(d as unknown as Analysis);
       detailsAsked.current = null;
       // Suggested answers are pre-filled so the user can accept or edit; facts only they know come back empty.
       setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: q.suggestion ?? "" })));
       if (!d.questions?.length) {
         setBusy(null);
-        await forge([], d);
+        await forge([], d as unknown as Analysis);
         return;
       }
       setStage("clarify");
     } catch (e) {
-      setError((e as Error).message);
+      const f = fromException(e);
+      if (f) setError(f, "brief");
     } finally {
       setBusy((b) => (b === "analyze" ? null : b));
     }
@@ -691,8 +840,10 @@ export default function Page() {
   }
 
   async function generate(clar: Clarification[] = answers, b: Brief = brief) {
-    setError("");
+    setError(null);
+    lastRun.current = (nb) => generate(clar, nb ?? b);
     if (!objectiveOk()) return;
+    setLeftOut(gibNow);
     if (!canAI) return instant(clar);
     persistPrefs();
     setBusy("generate");
@@ -704,8 +855,13 @@ export default function Page() {
   }
 
   async function refine(text = feedback) {
-    if (!current || !text.trim()) return;
-    setError("");
+    if (!current) return;
+    if (!text.trim()) {
+      setFeedbackErr({ msg: "Say what to change before refining.", hint: "For example: “make it shorter” or “add a rollback plan”." });
+      return feedbackRef.current?.focus();
+    }
+    setError(null);
+    lastRun.current = () => refine(text);
     setBusy("refine");
     try {
       const before = countWords(current.text);
@@ -747,7 +903,9 @@ export default function Page() {
   function instant(clar: Clarification[] = answers) {
     // The no-AI template pastes the objective verbatim, so never build one from keyboard mash.
     if (!objectiveOk()) return;
-    pushVersion(compileTemplate(effective, clar), `${fw.name} template`);
+    setErrorState(null);
+    setLeftOut(gibNow);
+    pushVersion(compileTemplate(withoutGibberish(effective), clar), `${fw.name} template`);
     setStage("forge");
   }
 
@@ -838,7 +996,7 @@ export default function Page() {
           </div>
 
           <div className="panel-b">
-            {error && <div className="err">{error}</div>}
+            {error?.where === "brief" && <ErrorNote error={error} onAction={runAction} onDismiss={() => setErrorState(null)} />}
 
             {stage !== "clarify" && (
               <>
@@ -873,7 +1031,8 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="role" label="AI's role" hint="optional" spark={spark("role")} />
-                  <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} />
+                  <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} {...gibAria("role")} />
+                  {gib("role")}
                 </div>
 
                 <div className="field">
@@ -904,6 +1063,7 @@ export default function Page() {
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
                   <textarea
                     rows={3}
+                    ref={objectiveRef}
                     value={brief.objective}
                     maxLength={FIELD_MAX.objective}
                     onChange={(e) => set("objective", e.target.value)}
@@ -913,7 +1073,8 @@ export default function Page() {
                   />
                   {objErr && (
                     <div className="err" id="objective-err" role="alert" style={{ margin: "6px 0 0" }}>
-                      {objErr} <span style={{ opacity: 0.85 }}>{OBJECTIVE_EXAMPLE}</span>
+                      {objErr.msg}
+                      {objErr.hint && <span className="err-hint">{objErr.hint}</span>}
                     </div>
                   )}
                   {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
@@ -938,18 +1099,21 @@ export default function Page() {
                     hint={fw.id === "bab" ? "what exists today, what's wrong" : ph("contextHint")}
                     spark={spark("context")}
                   />
-                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} />
+                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} {...gibAria("context")} />
+                  {gib("context")}
                 </div>
 
                 {showAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
-                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience")} />
+                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience")} {...gibAria("audience")} />
+                  {gib("audience")}
                     </div>
                     <div className="field">
                       <FieldLabel field="tone" label="Tone" hint={simple ? "how it should sound" : fw.name} spark={spark("tone")} />
-                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone")} />
+                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone")} {...gibAria("tone")} />
+                  {gib("tone")}
                     </div>
                   </div>
                 )}
@@ -957,11 +1121,13 @@ export default function Page() {
                 <div className="row">
                   <div className="field">
                     <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
-                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable")} />
+                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable")} {...gibAria("deliverable")} />
+                  {gib("deliverable")}
                   </div>
                   <div className="field">
                     <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
-                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria")} />
+                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria")} {...gibAria("successCriteria")} />
+                  {gib("successCriteria")}
                   </div>
                 </div>
 
@@ -986,6 +1152,7 @@ export default function Page() {
                       + Add rule
                     </button>
                   </div>
+                  {gib("rules")}
                 </div>
 
                 {isApi && (
@@ -1060,11 +1227,13 @@ export default function Page() {
                   <div className="row">
                     <div className="field">
                       <FieldLabel field="inputs" label="Inputs / assets" spark={spark("inputs")} />
-                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder={ph("inputs")} />
+                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder={ph("inputs")} {...gibAria("inputs")} />
+                  {gib("inputs")}
                     </div>
                     <div className="field">
                       <FieldLabel field="outputFormat" label="Response format" spark={spark("outputFormat")} />
-                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder={ph("outputFormat")} />
+                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder={ph("outputFormat")} {...gibAria("outputFormat")} />
+                  {gib("outputFormat")}
                     </div>
                   </div>
                   <div className="row">
@@ -1157,7 +1326,8 @@ export default function Page() {
                   )}
                 </div>
                 {server && !canAI && <p className="note">AI generation isn&apos;t available right now, so this builds a template from your brief. Add context and success criteria for a better result.</p>}
-                {!ready && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
+                {!ready && brief.objective.trim() && <p className="note">Add a few more words to the objective, such as who it&apos;s for or what the result is.</p>}
+                {!ready && !brief.objective.trim() && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
                 {ready && asking && <p className="note">One sentence is enough. Answer a few quick questions and your answers become the context and success criteria.</p>}
               </>
             )}
@@ -1274,7 +1444,13 @@ export default function Page() {
               {current.missing.length ? `Missing ${current.missing.join(", ")} — ask a refinement to restore` : `${current.label} · all required sections present`}
             </div>
           )}
+          {current && !viewingRef && !streamingNow && leftOut.length > 0 && (
+            <div className="contract ref">
+              Left out {leftOut.map((f) => FIELD_HELP[f].label).join(", ")} because {leftOut.length === 1 ? "it didn't" : "they didn't"} read as words. Edit and generate again to include {leftOut.length === 1 ? "it" : "them"}.
+            </div>
+          )}
           {streamingNow && streaming && <div className="gen-bar" aria-hidden />}
+          {error?.where === "output" && !streamingNow && <ErrorNote error={error} onAction={runAction} onDismiss={() => setErrorState(null)} inset />}
           {thinking ? (
             <div className="out empty">
               <ForgeLoader kind={busy === "refine" ? "refine" : busy === "repair" ? "repair" : "generate"} elapsed={elapsed} framework={fw.name} />
@@ -1304,8 +1480,11 @@ export default function Page() {
               </div>
               <div className="refine-row">
                 <textarea
+                  ref={feedbackRef}
                   value={feedback}
                   maxLength={LIMITS.feedback}
+                  aria-invalid={!!feedbackErr}
+                  aria-describedby={feedbackErr ? "feedback-err" : undefined}
                   onChange={(e) => setFeedback(cleanText(e.target.value, LIMITS.feedback))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) refine();
@@ -1316,6 +1495,12 @@ export default function Page() {
                   {busy === "refine" || busy === "repair" ? <Spinner label="Refining" /> : "Refine"}
                 </button>
               </div>
+              {feedbackErr && (
+                <div className="err" id="feedback-err" role="alert" style={{ margin: "8px 0 0" }}>
+                  {feedbackErr.msg}
+                  {feedbackErr.hint && <span className="err-hint">{feedbackErr.hint}</span>}
+                </div>
+              )}
             </div>
           )}
         </section>

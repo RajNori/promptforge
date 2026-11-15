@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { FIELD_HELP, type FieldHelp } from "@/lib/help";
 import { FRAMEWORKS, TARGETS, autoPick } from "@/lib/forge";
+import { ACTION_LABEL, type ErrorAction, type FriendlyError } from "@/lib/errors";
 import { PERSONAS, defaultProfile, persona as personaOf, templatesFor, type PersonaId, type Profile, type Template } from "@/lib/personas";
 
 /** Hover/focus tooltip with guidance, a good example, and what to avoid. */
@@ -229,6 +230,33 @@ export function ForgeLoader({ kind, elapsed, framework }: { kind: keyof typeof S
           <li key={s} className={j < i ? "done" : j === i ? "on" : ""} />
         ))}
       </ol>
+    </div>
+  );
+}
+
+/**
+ * A failed request, in the existing .err style: what happened, how to fix it, and buttons for the fixes.
+ * Announced to screen readers; it doesn't take focus, so typing isn't interrupted.
+ */
+export function ErrorNote({ error, onAction, onDismiss, inset }: { error: FriendlyError; onAction: (a: ErrorAction) => void; onDismiss: () => void; inset?: boolean }) {
+  return (
+    <div className={`err err-note${inset ? " inset" : ""}`} role="alert">
+      <div className="err-body">
+        <b>{error.msg}</b>
+        {error.hint && <span className="err-hint">{error.hint}</span>}
+        {error.actions.length > 0 && (
+          <div className="err-acts">
+            {error.actions.map((a, i) => (
+              <button key={a} className={`btn sm${i ? " ghost" : ""}`} onClick={() => onAction(a)}>
+                {ACTION_LABEL[a]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <button className="err-x" onClick={onDismiss} aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+      </button>
     </div>
   );
 }
