@@ -5,8 +5,8 @@
  * common word, so real objectives (including terse, jargon-heavy or non-English ones) aren't blocked here.
  */
 
-export const UNCLEAR_OBJECTIVE_MSG = "We couldn't tell what you want from that objective. Describe the task in a sentence.";
-export const OBJECTIVE_EXAMPLE = "e.g. Write a friendly email inviting my team to Friday's product demo.";
+export const UNCLEAR_OBJECTIVE_MSG = "We couldn't read this.";
+export const OBJECTIVE_EXAMPLE = "Say what you want in one sentence, for example: Write a launch email for our new pricing.";
 
 /** The model answers with exactly this line (generate) or {"understood": false} (analyze) when the brief has no discernible task. */
 export const UNCLEAR_MARKER = "UNCLEAR_OBJECTIVE";
@@ -15,7 +15,7 @@ const V = "aeiouyàáâãäåæèéêëìíîïòóôõöøùúûüýÿœ";
 const VOWEL = new RegExp(`[${V}]`, "i");
 const CONSONANT_RUN = new RegExp(`[^${V}]{5,}`, "i");
 // Letter groups that make one sound, removed before counting consonant runs ("strengths", "Rechtsschutz").
-const DIGRAPHS = /sch|tch|ch|sh|th|ph|gh|ng|ck|wh|rh|sz|cz|rz|dz|ß|([^aeiouy])\1/g;
+const DIGRAPHS = /str|spr|scr|spl|sch|tch|ch|sh|th|ph|gh|ng|ck|wh|rh|sz|cz|rz|dz|ß|([^aeiouy])\1/g;
 
 // Common words in English and the main Latin-script languages. One of these anywhere means it's language.
 const COMMON = new Set(
@@ -33,17 +33,16 @@ const COMMON = new Set(
   ).split(" "),
 );
 
-// Runs of 4+ adjacent keys on a QWERTY row (either direction): "asdf", "hjkl", "poiu".
-const ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
-function keyboardRun(t: string): boolean {
-  for (const row of ROWS)
-    for (const r of [row, [...row].reverse().join("")])
-      for (let i = 0; i + 4 <= r.length; i++) if (t.includes(r.slice(i, i + 4))) return true;
-  return false;
-}
+// Four adjacent keys on a QWERTY row, either direction ("asdf", "lkjh", "qwerty"). "wert", "erty" and "trew"
+// are left out because real words contain them ("powertrain", "property", "strewn").
+const KEY_RUNS = [
+  "qwer", "rtyu", "tyui", "yuio", "uiop", "asdf", "sdfg", "dfgh", "fghj", "ghjk", "hjkl", "zxcv", "xcvb", "cvbn", "vbnm",
+  "poiu", "oiuy", "iuyt", "uytr", "rewq", "lkjh", "kjhg", "jhgf", "hgfd", "gfds", "fdsa", "mnbv", "nbvc", "bvcx", "vcxz",
+];
+const keyboardRun = (t: string) => KEY_RUNS.some((k) => t.includes(k));
 
 // Letter pairs that essentially never occur inside real words in Latin-script languages.
-const RARE_PAIRS = /jf|jd|jk|jl|js|jh|jg|kj|sj|hj|gj|qj|xj|zj|vj|wj|jq|jx|jz|jv|jw|qz|zq|qx|xq|zx|xz|vq|qv|fq|qf|kq|qk|dk|fk|gk|vk|kv|zk|kz|hx|xh/;
+const RARE_PAIRS = /jf|jd|jk|jl|js|jh|jg|gj|qj|xj|zj|vj|wj|jq|jx|jz|jv|jw|qz|zq|qx|zx|xz|vq|qv|fq|qf|kq|qk/;
 
 /** A Latin-letter token that no language would produce. */
 function mashed(token: string): boolean {
@@ -51,8 +50,8 @@ function mashed(token: string): boolean {
   if (/(.)\1{3,}/.test(t)) return true; // "aaaa"
   if (CONSONANT_RUN.test(t.replace(DIGRAPHS, ""))) return true; // "aklsdj", "sjfljsdlkfjs"; "instructions" (nstr) passes
   if (t.length >= 4 && keyboardRun(t)) return true; // "asdf", "qwerty"
-  if (t.length >= 6 && /^(.{1,3})\1+.{0,2}$/.test(t)) return true; // "asdasdasd", "hdhdhd", "oiuoiuoiu"
-  if (t.length >= 5 && new Set(t).size <= 2) return true; // "hdhdh", "dhdhd"
+  if (/^(.{1,3})\1{2,}.{0,2}$/.test(t)) return true; // "asdasdasd", "hdhdhd", "oiuoiuoiu" (three repeats: "barbaric" passes)
+  if (t.length >= 7 && new Set(t).size <= 2) return true; // "hdhdhdh"
   if (t.length >= 5 && RARE_PAIRS.test(t.replace(/ij/g, "i"))) return true; // "lkajsd", "aklsdj" (Dutch "ij" excused)
   if (t.length >= 18 && [...t].filter((c) => VOWEL.test(c)).length / t.length < 0.25) return true;
   return false;
@@ -72,4 +71,46 @@ export function isGibberishObjective(raw: string): boolean {
   if (tokens.length >= 2 && new Set(tokens).size === 1) return true;
   // No common word at all: block if most substantial tokens look like mash.
   return judged.filter(mashed).length * 2 > judged.length;
+}
+
+/** Shown under a non-objective field when its text doesn't read as words (Simple mode). */
+export const UNCLEAR_FIELD_MSG = "This doesn't read as words. Write it in plain language, or clear it.";
+
+/**
+ * Same idea as isGibberishObjective, but for the optional fields. Looser: short values ("formal", "Q3",
+ * "18-25", "≤ 200 words") are normal here, so only all-mash text and pure punctuation are flagged.
+ */
+export function isGibberishField(raw: string): boolean {
+  const text = raw.normalize("NFC").trim();
+  if (!text) return false;
+  if (!/\p{L}/u.test(text)) return !/\d/.test(text); // "???", "..." — but numbers like "18-25" are real answers
+  if (/[^\p{Script=Latin}\P{L}]/u.test(text)) return false;
+  const tokens = text.toLowerCase().match(/\p{L}+/gu) ?? [];
+  if (tokens.some((t) => COMMON.has(t))) return false;
+  const judged = tokens.filter((t) => t.length >= 4);
+  if (tokens.length >= 2 && new Set(tokens).size === 1 && judged.length) return true; // "asdf asdf"
+  return judged.length > 0 && judged.every(mashed);
+}
+
+type TextFields = { role: string; context: string; audience: string; tone: string; deliverable: string; successCriteria: string; inputs: string; outputFormat: string; rules: { rule: string; why: string }[] };
+const TEXT_FIELDS = ["role", "context", "audience", "tone", "deliverable", "successCriteria", "inputs", "outputFormat"] as const;
+
+/**
+ * Backstop for Advanced mode, where the nudge doesn't block: blank optional fields and rules that are keyboard
+ * mash, so they never reach the model or the no-AI template. The browser says which fields were left out.
+ */
+export function withoutGibberish<T extends TextFields>(b: T): T {
+  const out: T = { ...b };
+  let changed = false;
+  for (const f of TEXT_FIELDS)
+    if (isGibberishField(out[f])) {
+      (out as TextFields)[f] = "";
+      changed = true;
+    }
+  const rules = out.rules.filter((r) => !isGibberishField(r.rule) && !isGibberishField(r.why));
+  if (rules.length !== out.rules.length) {
+    out.rules = rules;
+    changed = true;
+  }
+  return changed ? out : b;
 }

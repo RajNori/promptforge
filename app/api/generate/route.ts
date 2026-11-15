@@ -15,7 +15,7 @@ import {
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
 import { getViewer } from "@/lib/server/account";
 import { estimateTokens, refund, release, reserve, settle } from "@/lib/server/metering";
-import { OBJECTIVE_EXAMPLE, UNCLEAR_MARKER, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_MARKER, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective, withoutGibberish } from "@/lib/objective";
 import { unitsFor } from "@/lib/plans";
 import { LIMITS, cleanText } from "@/lib/sanitize";
 import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
@@ -92,7 +92,8 @@ export async function POST(req: NextRequest) {
   // Identity first: the user's role decides what kind of job this is, for every stage below.
   const viewer = await getViewer(req);
   const persona = viewer.profile?.persona ?? body.persona ?? null;
-  const brief = normalizeBrief(asBrief(body.brief), persona);
+  // Optional fields that are keyboard mash are left out, so they never reach the model (the form already nudged the person).
+  const brief = withoutGibberish(normalizeBrief(asBrief(body.brief), persona));
   if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required.", code: "objective_required" });
   if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints.", code: "objective_short" });
   // Obvious keyboard mash never reaches the model or the quota (same loose check the browser runs first).
