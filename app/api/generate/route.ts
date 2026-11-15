@@ -14,7 +14,8 @@ import {
 } from "@/lib/forge";
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
 import { getViewer } from "@/lib/server/account";
-import { estimateTokens, release, reserve, settle } from "@/lib/server/metering";
+import { estimateTokens, refund, release, reserve, settle } from "@/lib/server/metering";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_MARKER, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
 import { unitsFor } from "@/lib/plans";
 import { LIMITS, cleanText } from "@/lib/sanitize";
 import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
@@ -58,6 +59,9 @@ function json(status: number, data: unknown) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 }
 
+/** No prompt for an objective with no discernible task: the client shows this inline on the objective field. */
+const unclear = () => json(422, { error: UNCLEAR_OBJECTIVE_MSG, example: OBJECTIVE_EXAMPLE, code: "unclear_objective" });
+
 const GENERIC_FAIL = "Generation failed. Please try again.";
 const sys = (canary: string, content: string) => `${securityPreamble(canary)}\n\n${content}`;
 
@@ -91,6 +95,8 @@ export async function POST(req: NextRequest) {
   const brief = normalizeBrief(asBrief(body.brief), persona);
   if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
   if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints." });
+  // Obvious keyboard mash never reaches the model or the quota (same loose check the browser runs first).
+  if ((body.mode === "analyze" || body.mode === "generate" || body.mode === "hints") && isGibberishObjective(brief.objective)) return unclear();
 
   // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
@@ -286,6 +292,10 @@ export async function POST(req: NextRequest) {
     }
     try {
       const p = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
+      if (p?.unclear === true) {
+        console.warn("[guard] unclear objective (analyze)", { subject: viewer.subject });
+        return unclear();
+      }
       const q = (Array.isArray(p.questions) ? p.questions : [])
         .slice(0, 4)
         .map((x: { question?: unknown; why?: unknown; suggestion?: unknown }) => ({
@@ -298,9 +308,13 @@ export async function POST(req: NextRequest) {
         score: Math.max(0, Math.min(100, Number(p.score) || 0)),
         gaps: (Array.isArray(p.gaps) ? p.gaps : []).slice(0, 6).map((g: unknown) => cleanText(g, 300)).filter(Boolean),
         questions: q,
+        details: (Array.isArray(p.details) ? p.details : [])
+          .map((x: { label?: unknown; hint?: unknown }) => ({ label: cleanText(x?.label, 80).trim(), hint: cleanText(x?.hint, 120).trim() }))
+          .filter((x: { label: string }) => x.label)
+          .slice(0, 6),
       });
     } catch {
-      return json(200, { score: 50, gaps: [], questions: [] });
+      return json(200, { score: 50, gaps: [], questions: [], details: [] });
     }
   }
 
@@ -315,6 +329,10 @@ export async function POST(req: NextRequest) {
       let finish: string | null = null;
       let failed = false;
       let tokens: number | undefined;
+      // Hold the first characters back until we know they aren't the "unclear objective" marker,
+      // so the marker never flashes on screen as if it were a prompt.
+      let holding = body.mode === "generate";
+      const emit = (t: string) => controller.enqueue(encoder.encode(t.replaceAll(canary, "")));
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -338,8 +356,16 @@ export async function POST(req: NextRequest) {
               const delta: string | undefined = choice?.delta?.content;
               if (delta) {
                 full += delta;
+                if (holding) {
+                  const head = full.trimStart();
+                  if (head.length <= UNCLEAR_MARKER.length && UNCLEAR_MARKER.startsWith(head)) continue;
+                  if (head.startsWith(UNCLEAR_MARKER)) continue; // stays held; judged at the end
+                  holding = false;
+                  emit(full);
+                  continue;
+                }
                 // Strip the canary if it arrives whole in one delta; split canaries are caught by the final check (output discarded).
-                controller.enqueue(encoder.encode(delta.replaceAll(canary, "")));
+                emit(delta);
               }
               if (choice?.finish_reason) finish = choice.finish_reason;
             } catch {
@@ -351,11 +377,18 @@ export async function POST(req: NextRequest) {
         failed = true;
         console.error("[generate] stream read failed", e);
       } finally {
-        await settle(reservation, tokens ?? estimateTokens(inputChars, full));
+        const used = tokens ?? estimateTokens(inputChars, full);
+        const isUnclear = body.mode === "generate" && full.trim().startsWith(UNCLEAR_MARKER);
+        // An unclear objective produced no prompt, so it doesn't count against the user's quota.
+        if (isUnclear) await refund(reservation, used);
+        else await settle(reservation, used);
         let status: string | null = null;
         if (!failed && finish) {
           status = finish === "length" ? "len" : "ok";
-          if (full.includes(canary)) {
+          if (isUnclear) {
+            status = "unclear";
+            console.warn("[guard] unclear objective (generate)", { subject: viewer.subject });
+          } else if (full.includes(canary)) {
             status = "blocked";
             console.error("[guard] canary leak blocked", { subject: viewer.subject, mode: body.mode });
           } else if (requiredHeadings(brief).length && missingSections(full, brief).length === requiredHeadings(brief).length && !brief.chain) {
@@ -364,6 +397,8 @@ export async function POST(req: NextRequest) {
             console.warn("[guard] off-task output", { subject: viewer.subject, mode: body.mode, len: full.length });
           }
         } else console.error("[generate] stream ended without clean finish", { finish, failed });
+        // Short output still held back at the end (not the marker): release it now.
+        if (holding && !isUnclear && status !== "blocked") emit(full);
         if (status) controller.enqueue(encoder.encode(EOT + status));
         controller.close();
       }
