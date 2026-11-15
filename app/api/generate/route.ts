@@ -8,6 +8,7 @@ import {
   requiredHeadings,
   targetGuidance,
   normalizeBrief,
+  compileTemplate,
   isEngineering,
   EMPTY_BRIEF,
   type Brief,
@@ -15,7 +16,7 @@ import {
 import { BodySchema, asBrief, makeCanary, sameOrigin, securityPreamble, suspicious, untrusted } from "@/lib/server/guard";
 import { getViewer } from "@/lib/server/account";
 import { estimateTokens, refund, release, reserve, settle } from "@/lib/server/metering";
-import { OBJECTIVE_EXAMPLE, UNCLEAR_MARKER, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective, withoutGibberish } from "@/lib/objective";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_MARKER, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective, needsVerdict, VERDICT_SYSTEM, withoutGibberish } from "@/lib/objective";
 import { unitsFor } from "@/lib/plans";
 import { LIMITS, cleanText } from "@/lib/sanitize";
 import { HINTS_SYSTEM, HINT_FIELDS, SUGGEST_SYSTEM, applicableFields, hasSignal, hintsRequest, isEmpty, suggestRequest, type SuggestField } from "@/lib/help";
@@ -70,7 +71,11 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode.", code: "not_configured" });
+  // Quick draft needs no AI, but still goes through every check below; everything else needs the provider.
+  const aiOn = configured();
+  const peek = req.clone();
+  const isTemplate = await peek.json().then((b) => b?.mode === "template").catch(() => false);
+  if (!aiOn && !isTemplate) return json(503, { error: "AI generation isn't configured. Use Instant template mode.", code: "not_configured" });
   if (!sameOrigin(req)) return json(403, { error: "Forbidden.", code: "forbidden" });
   const { url, key, model, extra: baseExtra, fast } = cfg();
 
@@ -100,6 +105,21 @@ export async function POST(req: NextRequest) {
   // Suggest is included: filling fields from keyboard mash only spreads it through the brief.
   if (body.mode !== "refine" && isGibberishObjective(brief.objective)) return unclear();
 
+  // Quick draft: one choke point with the AI paths. Same pattern check above; the model verdict too when AI is on.
+  if (body.mode === "template") {
+    if (aiOn && needsVerdict(brief.objective)) {
+      const check = await reserve(viewer, "template", 0, false).catch(() => null);
+      if (check && !check.ok) return json(check.status, { error: check.error, code: check.code });
+      const ok = await objectiveVerdict(brief.objective, { url, key, model, extra: { ...baseExtra, ...fast } });
+      await settle(check?.ok ? check.id : null, 150);
+      if (ok === false) {
+        console.warn("[guard] unclear objective (verdict)", { subject: viewer.subject, mode: body.mode });
+        return unclear();
+      }
+    }
+    return json(200, { text: compileTemplate(brief, body.clarifications) });
+  }
+
   // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
   if (body.mode === "suggest") {
@@ -124,6 +144,17 @@ export async function POST(req: NextRequest) {
   }
   if (!check.ok) return json(check.status, { error: check.error, code: check.code });
   const reservation = check.id;
+
+  // Unproven objective (no common word): get a yes/no verdict before anything is built from it. Enforced here,
+  // on every path that can produce a prompt or fill fields, instead of trusting an opt-out inside the main prompt.
+  if ((body.mode === "analyze" || body.mode === "generate" || body.mode === "suggest") && needsVerdict(brief.objective)) {
+    const ok = await objectiveVerdict(brief.objective, { url, key, model, extra: { ...baseExtra, ...fast } });
+    if (ok === false) {
+      console.warn("[guard] unclear objective (verdict)", { subject: viewer.subject, mode: body.mode });
+      await refund(reservation, 0);
+      return unclear();
+    }
+  }
 
   const userText = [brief.objective, brief.context, body.mode === "refine" ? body.feedback : ""].join("\n");
   if (suspicious(userText)) console.warn("[guard] suspicious input", { subject: viewer.subject, mode: body.mode });
@@ -381,7 +412,9 @@ export async function POST(req: NextRequest) {
         console.error("[generate] stream read failed", e);
       } finally {
         const used = tokens ?? estimateTokens(inputChars, full);
-        const isUnclear = body.mode === "generate" && full.trim().startsWith(UNCLEAR_MARKER);
+        // Also catch the model writing a prompt anyway while saying the objective is nonsense (seen live, 16 Nov 2026).
+        const isUnclear =
+          body.mode === "generate" && (full.trim().startsWith(UNCLEAR_MARKER) || SAYS_GIBBERISH.test(full));
         // An unclear objective produced no prompt, so it doesn't count against the user's quota.
         if (isUnclear) await refund(reservation, used);
         else await settle(reservation, used);
@@ -440,3 +473,43 @@ function parseSuggestions(text: string, fields: SuggestField[]): Record<string, 
 
 // "because Prevents…" → "because prevents…" (keep acronyms like "API" intact).
 const lowerFirst = (t: string) => (/^[A-Z][a-z]/.test(t) ? t[0].toLowerCase() + t.slice(1) : t);
+
+const SAYS_GIBBERISH = /\bobjective\b[^.\n]{0,40}\b(is|was|appears|seems|looks)\b[^.\n]{0,30}\b(gibberish|garbled|unintelligible|nonsensical|keyboard mash|random (characters|letters))/i;
+
+// Verdicts per objective, per instance: retries and the analyze -> generate pair don't pay twice.
+const verdicts = new Map<string, boolean>();
+
+/** true = a real task, false = gibberish, null = couldn't tell (provider error): fail open, the pattern check already ran. */
+async function objectiveVerdict(objective: string, c: { url: string; key: string; model: string; extra: Record<string, unknown> }): Promise<boolean | null> {
+  const k = objective.trim().toLowerCase().replace(/\s+/g, " ");
+  if (verdicts.has(k)) return verdicts.get(k)!;
+  try {
+    const r = await fetch(`${c.url}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...c.extra,
+        model: c.model,
+        temperature: 0,
+        max_tokens: 200,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: VERDICT_SYSTEM },
+          { role: "user", content: `TEXT: ${JSON.stringify(objective.slice(0, 300))}` },
+        ],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => null);
+    const raw: string = d?.choices?.[0]?.message?.content ?? "";
+    const m = raw.match(/"task"\s*:\s*(true|false)/);
+    if (!m) return null;
+    const v = m[1] === "true";
+    if (verdicts.size > 2000) verdicts.clear();
+    verdicts.set(k, v);
+    return v;
+  } catch {
+    return null;
+  }
+}
