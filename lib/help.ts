@@ -109,11 +109,15 @@ export const FIELD_HELP: Record<SuggestField | "examples", FieldHelp> = {
   },
 };
 
-/** Fields that are relevant for this brief (framework / target dependent). */
-export function applicableFields(b: Brief): SuggestField[] {
+/**
+ * Fields that are relevant for this brief (framework / target dependent).
+ * `audienceTone`: the screen shows Audience and Tone even though the framework doesn't need them
+ * (Simple mode always does), so they can be filled like any other visible field.
+ */
+export function applicableFields(b: Brief, opts: { audienceTone?: boolean } = {}): SuggestField[] {
   const fw = resolveFramework(b);
   return SUGGEST_FIELDS.filter((f) => {
-    if (f === "audience" || f === "tone") return fw.usesAudienceTone;
+    if (f === "audience" || f === "tone") return fw.usesAudienceTone || !!opts.audienceTone;
     if (f === "prefill" || f === "outputSchema") return b.target === "api-system";
     return true;
   });
