@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { auth } from "@/auth";
 import { db } from "./db";
 import { PLANS, type PlanId } from "@/lib/plans";
+import { aiActionsFor } from "./limits";
 import { parseProfile } from "@/lib/profile";
 import type { Profile } from "@/lib/personas";
 
@@ -59,7 +60,7 @@ export function periodStart(plan: PlanId, now = new Date()): Date {
 
 export async function usageSummary(v: Viewer) {
   const prisma = db();
-  const limit = PLANS[v.plan].aiActions;
+  const limit = aiActionsFor(v.plan);
   if (!prisma) return { used: 0, limit, resetsAt: null as string | null, metered: false };
   const since = periodStart(v.plan);
   const agg = await prisma.usageEvent.aggregate({ where: { subject: v.subject, createdAt: { gte: since } }, _sum: { units: true } });

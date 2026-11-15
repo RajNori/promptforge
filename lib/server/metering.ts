@@ -2,6 +2,7 @@ import "server-only";
 import { db } from "./db";
 import { periodStart, type Viewer } from "./account";
 import { PLANS } from "@/lib/plans";
+import { aiActionsFor } from "./limits";
 
 export type Reservation =
   | { ok: true; id: string | null }
@@ -79,12 +80,13 @@ export async function reserve(v: Viewer, mode: string, units: number, auto: bool
       const used =
         (await tx.usageEvent.aggregate({ where: { subject: v.subject, createdAt: { gte: periodStart(v.plan) } }, _sum: { units: true } }))._sum
           .units ?? 0;
-      if (used + units > plan.aiActions) {
+      const allowed = aiActionsFor(v.plan);
+      if (used + units > allowed) {
         const msg =
           v.plan === "ANON"
-            ? `You've used today's ${plan.aiActions} free guest generations. Sign in for ${PLANS.FREE.aiActions}/month free.`
+            ? `You've used today's ${allowed} free guest generations. Sign in for ${PLANS.FREE.aiActions}/month free.`
             : v.plan === "FREE"
-              ? `You've used all ${plan.aiActions} AI generations this month. Upgrade to Pro for ${PLANS.PRO.aiActions}/month.`
+              ? `You've used all ${allowed} AI generations this month. Upgrade to Pro for ${PLANS.PRO.aiActions}/month.`
               : "Monthly AI limit reached. Contact support to raise it.";
         return { ok: false, status: 402, error: msg, code: "quota" } as const;
       }
