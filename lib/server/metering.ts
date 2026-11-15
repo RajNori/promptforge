@@ -131,5 +131,19 @@ export async function release(id: string | null) {
   }
 }
 
+/**
+ * Keep the row (burst limit and daily token budget still see the call) but give the quota units back.
+ * Used when the model judged the objective unclear and produced no prompt, so the user isn't charged for it.
+ */
+export async function refund(id: string | null, tokens: number) {
+  const prisma = db();
+  if (!prisma || !id) return;
+  try {
+    await prisma.usageEvent.update({ where: { id }, data: { units: 0, tokens: Math.max(0, Math.round(tokens)) } });
+  } catch (e) {
+    console.error("[metering] refund failed", e);
+  }
+}
+
 /** Rough token estimate when the provider doesn't report usage (≈4 chars per token). */
 export const estimateTokens = (...texts: string[]) => Math.ceil(texts.reduce((n, t) => n + t.length, 0) / 4);
