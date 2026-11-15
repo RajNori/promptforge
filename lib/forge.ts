@@ -469,10 +469,10 @@ Score reflects how well the brief captures the person's intent for THIS kind of 
 
 Then list the key details: the concrete facts the finished result will need that the brief does not state and only the person knows — names, dates, times, places, amounts, prices, contact details, product or company names (e.g. for a birthday invite: child's name, age, party date and time, venue, RSVP contact). Only facts that would otherwise be left blank, guessed or worded vaguely in the final result; never taste, tone, length or format. Leave out anything already in the brief or already covered by one of your questions. At most 6, most important first; none if the brief already has them or the task needs none (most software and analysis tasks need none). Each has a short label in the person's terms and a format hint that is not a real-looking value (e.g. "day, date and start time", not "Saturday 14 June, 2pm").
 
-If the brief has no discernible task at all (the objective is random characters, keyboard mash or meaningless text, and nothing else in the brief says what they want), do not guess a task and do not ask questions: respond with exactly {"unclear": true}. Short, terse, misspelled, jargon-heavy or non-English objectives are NOT unclear; ask about them as usual.
+First decide "understood": can you tell what task the person wants done? Set it to false when the objective is random characters, keyboard mash, a repeated filler word or otherwise meaningless, and nothing else in the brief says what they want. Then return {"understood": false} and nothing else: do not guess a task and do not ask questions, because a prompt built on a guess is useless to them. Short, terse, misspelled, jargon-heavy or non-English objectives ARE understood; ask about them as usual.
 
 Respond with ONLY valid JSON, no prose, no code fences:
-{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}], "details": [{"label": "short label", "hint": "format hint"}]}`;
+{"understood": true, "score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}], "details": [{"label": "short label", "hint": "format hint"}]}`;
 
 export function generateSystem(b: Brief): string {
   return `${PRIMER}

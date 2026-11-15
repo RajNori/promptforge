@@ -551,6 +551,7 @@ export default function Page() {
   async function suggest(field: SuggestField | "all") {
     if (sparking) return;
     setError("");
+    if (!objectiveOk()) return;
     persistPrefs();
     setSparking(field);
     const prev = brief;

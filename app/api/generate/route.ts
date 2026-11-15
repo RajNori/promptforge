@@ -96,7 +96,8 @@ export async function POST(req: NextRequest) {
   if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
   if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints." });
   // Obvious keyboard mash never reaches the model or the quota (same loose check the browser runs first).
-  if ((body.mode === "analyze" || body.mode === "generate" || body.mode === "hints") && isGibberishObjective(brief.objective)) return unclear();
+  // Suggest is included: filling fields from keyboard mash only spreads it through the brief.
+  if (body.mode !== "refine" && isGibberishObjective(brief.objective)) return unclear();
 
   // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
@@ -292,7 +293,7 @@ export async function POST(req: NextRequest) {
     }
     try {
       const p = JSON.parse(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1));
-      if (p?.unclear === true) {
+      if (p?.understood === false || p?.unclear === true) {
         console.warn("[guard] unclear objective (analyze)", { subject: viewer.subject });
         return unclear();
       }
