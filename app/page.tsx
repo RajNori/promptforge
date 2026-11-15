@@ -27,7 +27,8 @@ import { Select } from "./Select";
 import { AccountBar, useMe } from "./Account";
 import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
-import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { ErrorNote, FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
+import { ACTION_LABEL, RequestError, fromException, fromResponse, fromStreamStatus, readJson, type ErrorAction, type FriendlyError, type Mode as ReqMode } from "@/lib/errors";
 import { Onboarding } from "./Onboarding";
 import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
@@ -194,6 +195,8 @@ function useAskFirst(): boolean {
   return on;
 }
 
+const UNCLEAR = { msg: UNCLEAR_OBJECTIVE_MSG, hint: OBJECTIVE_EXAMPLE };
+
 export default function Page() {
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF);
   const [stage, setStage] = useState<Stage>("brief");
@@ -204,11 +207,18 @@ export default function Page() {
   const detailsAsked = useRef<Analysis | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
-  const [error, setError] = useState("");
-  // Inline error on the objective field when it isn't a recognisable task (no prompt is generated).
-  const [objErr, setObjErr] = useState("");
-  useEffect(() => setObjErr(""), [brief.objective]);
+  // A failed request: shown beside the action that failed (brief panel or output panel), with the actions that fix it.
+  const [error, setErrorState] = useState<(FriendlyError & { where: "brief" | "output" }) | null>(null);
+  // Field errors sit under their field: the objective (unclear task, too short…) and the refine request.
+  const [objErr, setObjErr] = useState<{ msg: string; hint?: string } | null>(null);
+  useEffect(() => setObjErr(null), [brief.objective]);
   const [feedback, setFeedback] = useState("");
+  const [feedbackErr, setFeedbackErr] = useState<{ msg: string; hint?: string } | null>(null);
+  useEffect(() => setFeedbackErr(null), [feedback]);
+  /** Re-runs the request that last failed; `b` swaps in an edited brief (e.g. Lean depth). */
+  const lastRun = useRef<((b?: Brief) => void) | null>(null);
+  const objectiveRef = useRef<HTMLTextAreaElement>(null);
+  const feedbackRef = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
   const [accessCode, setAccessCode] = useState("");
@@ -466,9 +476,46 @@ export default function Page() {
   /** Loose browser-side pre-check; the server and the model have the final say. */
   function objectiveOk(): boolean {
     if (!isGibberishObjective(brief.objective)) return true;
-    setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    setObjErr(UNCLEAR);
     setStage("brief");
     return false;
+  }
+
+  /** Show a request error; field errors go under their field instead of in a panel. */
+  function setError(f: FriendlyError | null, where: "brief" | "output" = "brief") {
+    if (!f) return setErrorState(null);
+    if (f.field === "objective") {
+      setErrorState(null);
+      setStage("brief");
+      setObjErr({ msg: f.msg, hint: f.hint });
+      requestAnimationFrame(() => objectiveRef.current?.focus());
+      return;
+    }
+    if (f.field === "feedback" && current) {
+      setErrorState(null);
+      setFeedbackErr({ msg: f.msg, hint: f.hint });
+      requestAnimationFrame(() => feedbackRef.current?.focus());
+      return;
+    }
+    setErrorState({ ...f, where });
+  }
+
+  function runAction(a: ErrorAction) {
+    setErrorState(null);
+    if (a === "retry") return lastRun.current?.();
+    if (a === "lean") {
+      const nb = { ...brief, depth: "lean" as const };
+      setBrief(nb);
+      return lastRun.current?.(nb);
+    }
+    if (a === "instant") return instant(answers);
+    if (a === "signin") return void (window.location.href = "/signin");
+    if (a === "pro") return void (window.location.href = "/pricing");
+    if (a === "edit-objective") {
+      setStage("brief");
+      return requestAnimationFrame(() => objectiveRef.current?.focus());
+    }
+    if (a === "edit-feedback") return feedbackRef.current?.focus();
   }
 
   async function stream(body: object): Promise<string | null> {
@@ -482,13 +529,13 @@ export default function Page() {
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ ...body, persona: profile?.persona }), signal: ctrl.signal });
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
+        const d = await readJson(r);
         if (d.code === "unclear_objective") {
-          setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+          setObjErr(UNCLEAR);
           setStage("brief");
           return null;
         }
-        throw new Error(d.error || `Request failed (${r.status})`);
+        throw new RequestError(fromResponse(r.status, d, (body as { mode: ReqMode }).mode));
       }
       const reader = r.body!.getReader();
       const dec = new TextDecoder();
@@ -500,21 +547,23 @@ export default function Page() {
         setStreaming(cut < 0 ? acc : acc.slice(0, cut));
       }
       const eot = acc.lastIndexOf("\u0004");
-      if (eot < 0) throw new Error("Generation was cut off before it finished. Try again — or use Lean depth for faster results.");
+      const depth = (body as { brief?: Brief }).brief?.depth ?? brief.depth;
+      if (eot < 0) throw new RequestError(fromStreamStatus("cut", depth));
       const status = acc.slice(eot + 1);
       if (status === "unclear") {
-        setObjErr(UNCLEAR_OBJECTIVE_MSG);
+        setObjErr(UNCLEAR);
         setStage("brief");
         return null;
       }
       const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
-      if (!clean) throw new Error("Empty response. Please try again.");
-      if (status === "blocked") throw new Error("That request couldn't be processed. Rephrase your brief and try again.");
-      if (status === "off") throw new Error("The output didn't follow the prompt format, so it wasn't saved. Try again or rephrase the brief.");
-      if (status === "len") setError("Output hit the length limit and may be incomplete — try Lean depth or turn off chain mode.");
+      if (status === "blocked") throw new RequestError(fromStreamStatus("blocked", depth, (body as { mode: ReqMode }).mode));
+      if (!clean) throw new RequestError(fromStreamStatus("empty", depth));
+      if (status === "off") throw new RequestError(fromStreamStatus("off", depth));
+      if (status === "len") setError(fromStreamStatus("len", depth), "output");
       return clean;
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setError((e as Error).message);
+      const f = fromException(e);
+      if (f) setError(f, "output");
       return null;
     } finally {
       setStreaming("");
@@ -550,14 +599,15 @@ export default function Page() {
 
   async function suggest(field: SuggestField | "all") {
     if (sparking) return;
-    setError("");
+    setError(null);
     persistPrefs();
     setSparking(field);
     const prev = brief;
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Suggestion failed");
+      const d = await readJson(r);
+      if (!r.ok) throw new RequestError(fromResponse(r.status, d, "suggest"));
+      if (!d.values || typeof d.values !== "object") throw new RequestError(fromResponse(502, { code: "empty_output" }, "suggest"));
       refreshMe();
       const values = d.values as Partial<Brief>;
       const keys = Object.keys(values) as SuggestField[];
@@ -567,7 +617,16 @@ export default function Page() {
       const base = field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`;
       showToast(gaps ? `${base} — replace the ${gaps} [bracketed] detail${gaps === 1 ? "" : "s"} only you know` : field === "all" ? `${base}: ${names.join(", ")}` : base, prev, gaps ? 14000 : 9000);
     } catch (e) {
-      showToast((e as Error).message);
+      const f = fromException(e);
+      if (!f) return;
+      if (f.field === "objective") return setObjErr({ msg: f.msg, hint: f.hint });
+      // Field fills keep the toast (they're small, in-place actions), but say what to do and offer the fix.
+      const acts = f.actions.filter((a) => a === "retry" || a === "signin" || a === "pro");
+      showToast(
+        f.hint ? `${f.msg} ${f.hint}` : f.msg,
+        acts.map((a, i) => ({ label: ACTION_LABEL[a], primary: i === 0, run: () => (a === "retry" ? suggest(field) : runAction(a)) })),
+        12000,
+      );
     } finally {
       setSparking(null);
     }
@@ -604,7 +663,7 @@ export default function Page() {
     setAnalysis(null);
     setAnswers([]);
     setFeedback("");
-    setError("");
+    setError(null);
     setStage("brief");
     if (!hadWork) return;
     showToast(
@@ -640,31 +699,34 @@ export default function Page() {
   }
 
   async function analyze() {
-    setError("");
+    setError(null);
+    lastRun.current = () => analyze();
     if (!objectiveOk()) return;
     if (!canAI) return instant();
     persistPrefs();
     setBusy("analyze");
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
-      const d = await r.json();
-      if (d?.code === "unclear_objective") {
-        setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+      const d = await readJson(r);
+      if (d.code === "unclear_objective") {
+        setObjErr(UNCLEAR);
         return;
       }
-      if (!r.ok) throw new Error(d.error || "Analysis failed");
-      setAnalysis(d);
+      if (!r.ok) throw new RequestError(fromResponse(r.status, d, "analyze"));
+      if (!Array.isArray(d.questions)) throw new RequestError(fromResponse(502, { code: "empty_output" }, "analyze"));
+      setAnalysis(d as unknown as Analysis);
       detailsAsked.current = null;
       // Suggested answers are pre-filled so the user can accept or edit; facts only they know come back empty.
       setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: q.suggestion ?? "" })));
       if (!d.questions?.length) {
         setBusy(null);
-        await forge([], d);
+        await forge([], d as unknown as Analysis);
         return;
       }
       setStage("clarify");
     } catch (e) {
-      setError((e as Error).message);
+      const f = fromException(e);
+      if (f) setError(f, "brief");
     } finally {
       setBusy((b) => (b === "analyze" ? null : b));
     }
@@ -691,7 +753,8 @@ export default function Page() {
   }
 
   async function generate(clar: Clarification[] = answers, b: Brief = brief) {
-    setError("");
+    setError(null);
+    lastRun.current = (nb) => generate(clar, nb ?? b);
     if (!objectiveOk()) return;
     if (!canAI) return instant(clar);
     persistPrefs();
@@ -704,8 +767,13 @@ export default function Page() {
   }
 
   async function refine(text = feedback) {
-    if (!current || !text.trim()) return;
-    setError("");
+    if (!current) return;
+    if (!text.trim()) {
+      setFeedbackErr({ msg: "Say what to change before refining.", hint: "For example: “make it shorter” or “add a rollback plan”." });
+      return feedbackRef.current?.focus();
+    }
+    setError(null);
+    lastRun.current = () => refine(text);
     setBusy("refine");
     try {
       const before = countWords(current.text);
@@ -747,6 +815,7 @@ export default function Page() {
   function instant(clar: Clarification[] = answers) {
     // The no-AI template pastes the objective verbatim, so never build one from keyboard mash.
     if (!objectiveOk()) return;
+    setErrorState(null);
     pushVersion(compileTemplate(effective, clar), `${fw.name} template`);
     setStage("forge");
   }
@@ -838,7 +907,7 @@ export default function Page() {
           </div>
 
           <div className="panel-b">
-            {error && <div className="err">{error}</div>}
+            {error?.where === "brief" && <ErrorNote error={error} onAction={runAction} onDismiss={() => setErrorState(null)} />}
 
             {stage !== "clarify" && (
               <>
@@ -904,6 +973,7 @@ export default function Page() {
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
                   <textarea
                     rows={3}
+                    ref={objectiveRef}
                     value={brief.objective}
                     maxLength={FIELD_MAX.objective}
                     onChange={(e) => set("objective", e.target.value)}
@@ -913,7 +983,8 @@ export default function Page() {
                   />
                   {objErr && (
                     <div className="err" id="objective-err" role="alert" style={{ margin: "6px 0 0" }}>
-                      {objErr} <span style={{ opacity: 0.85 }}>{OBJECTIVE_EXAMPLE}</span>
+                      {objErr.msg}
+                      {objErr.hint && <span className="err-hint">{objErr.hint}</span>}
                     </div>
                   )}
                   {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
@@ -1157,7 +1228,8 @@ export default function Page() {
                   )}
                 </div>
                 {server && !canAI && <p className="note">AI generation isn&apos;t available right now, so this builds a template from your brief. Add context and success criteria for a better result.</p>}
-                {!ready && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
+                {!ready && brief.objective.trim() && <p className="note">Add a few more words to the objective, such as who it&apos;s for or what the result is.</p>}
+                {!ready && !brief.objective.trim() && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
                 {ready && asking && <p className="note">One sentence is enough. Answer a few quick questions and your answers become the context and success criteria.</p>}
               </>
             )}
@@ -1275,6 +1347,7 @@ export default function Page() {
             </div>
           )}
           {streamingNow && streaming && <div className="gen-bar" aria-hidden />}
+          {error?.where === "output" && !streamingNow && <ErrorNote error={error} onAction={runAction} onDismiss={() => setErrorState(null)} inset />}
           {thinking ? (
             <div className="out empty">
               <ForgeLoader kind={busy === "refine" ? "refine" : busy === "repair" ? "repair" : "generate"} elapsed={elapsed} framework={fw.name} />
@@ -1304,8 +1377,11 @@ export default function Page() {
               </div>
               <div className="refine-row">
                 <textarea
+                  ref={feedbackRef}
                   value={feedback}
                   maxLength={LIMITS.feedback}
+                  aria-invalid={!!feedbackErr}
+                  aria-describedby={feedbackErr ? "feedback-err" : undefined}
                   onChange={(e) => setFeedback(cleanText(e.target.value, LIMITS.feedback))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) refine();
@@ -1316,6 +1392,12 @@ export default function Page() {
                   {busy === "refine" || busy === "repair" ? <Spinner label="Refining" /> : "Refine"}
                 </button>
               </div>
+              {feedbackErr && (
+                <div className="err" id="feedback-err" role="alert" style={{ margin: "8px 0 0" }}>
+                  {feedbackErr.msg}
+                  {feedbackErr.hint && <span className="err-hint">{feedbackErr.hint}</span>}
+                </div>
+              )}
             </div>
           )}
         </section>

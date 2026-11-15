@@ -70,44 +70,44 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode." });
-  if (!sameOrigin(req)) return json(403, { error: "Forbidden." });
+  if (!configured()) return json(503, { error: "AI generation isn't configured. Use Instant template mode.", code: "not_configured" });
+  if (!sameOrigin(req)) return json(403, { error: "Forbidden.", code: "forbidden" });
   const { url, key, model, extra: baseExtra, fast } = cfg();
 
   const code = process.env.ACCESS_CODE;
-  if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code." });
+  if (code && req.headers.get("x-access-code") !== code) return json(401, { error: "Invalid access code.", code: "access_code" });
 
   // Hard cap on body size before parsing (largest legit body is ~60KB).
   const raw = await req.text().catch(() => "");
-  if (raw.length > 120_000) return json(413, { error: "Request too large." });
+  if (raw.length > 120_000) return json(413, { error: "Request too large.", code: "too_large" });
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(raw);
   } catch {
-    return json(400, { error: "Invalid JSON" });
+    return json(400, { error: "Invalid JSON", code: "bad_request" });
   }
   const parsed = BodySchema.safeParse(parsedJson);
-  if (!parsed.success) return json(400, { error: "Invalid request." });
+  if (!parsed.success) return json(400, { error: "Invalid request.", code: "bad_request" });
   const body = parsed.data;
   // Identity first: the user's role decides what kind of job this is, for every stage below.
   const viewer = await getViewer(req);
   const persona = viewer.profile?.persona ?? body.persona ?? null;
   const brief = normalizeBrief(asBrief(body.brief), persona);
-  if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required." });
-  if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints." });
+  if (!brief.objective.trim() && body.mode !== "refine" && body.mode !== "suggest") return json(400, { error: "Objective is required.", code: "objective_required" });
+  if (body.mode === "hints" && brief.objective.trim().split(/\s+/).length < 2) return json(400, { error: "Objective too short for hints.", code: "objective_short" });
   // Obvious keyboard mash never reaches the model or the quota (same loose check the browser runs first).
   if ((body.mode === "analyze" || body.mode === "generate" || body.mode === "hints") && isGibberishObjective(brief.objective)) return unclear();
 
   // Field suggestions resolve which fields to fill before metering.
   let suggestFields: SuggestField[] = [];
   if (body.mode === "suggest") {
-    if (!hasSignal(brief)) return json(400, { error: "Add an objective or some context first." });
+    if (!hasSignal(brief)) return json(400, { error: "Add an objective or some context first.", code: "no_signal" });
     const allowed = applicableFields(brief, { audienceTone: body.audienceTone });
     const f = body.field as SuggestField | "all";
     suggestFields = f === "all" ? allowed.filter((x) => isEmpty(brief, x)) : allowed.includes(f) ? [f] : [];
-    if (!suggestFields.length) return json(400, { error: f === "all" ? "Nothing to fill — all fields have values." : "Unknown field." });
+    if (!suggestFields.length) return json(400, { error: f === "all" ? "Nothing to fill — all fields have values." : "Unknown field.", code: f === "all" ? "nothing_to_fill" : "bad_request" });
   }
-  if (body.mode === "refine" && (!body.prompt.trim() || !body.feedback.trim())) return json(400, { error: "Prompt and feedback are required." });
+  if (body.mode === "refine" && (!body.prompt.trim() || !body.feedback.trim())) return json(400, { error: "Prompt and feedback are required.", code: "refine_empty" });
 
   // Burst limit, quota and daily budget, reserved atomically before the call (refunded if the provider rejects it).
   const auto = body.mode === "refine" && body.auto;
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     // Fail closed: never call the provider without a reservation.
     console.error("[metering] reserve failed", e);
-    return json(503, { error: "AI generation is temporarily unavailable." });
+    return json(503, { error: "AI generation is temporarily unavailable.", code: "unavailable" });
   }
   if (!check.ok) return json(check.status, { error: check.error, code: check.code });
   const reservation = check.id;
@@ -214,16 +214,16 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     console.error("[generate] upstream unreachable", e);
     await release(reservation);
-    return json(502, { error: GENERIC_FAIL });
+    return json(502, { error: GENERIC_FAIL, code: "upstream" });
   }
 
   if (!upstream.ok) {
     await release(reservation);
     // Log the real error server-side only; never leak provider details to the client.
     console.error("[generate] upstream error", upstream.status, (await upstream.text().catch(() => "")).slice(0, 1000));
-    if (upstream.status === 429) return json(429, { error: "The AI service is busy. Try again in a moment." });
-    if (upstream.status === 402) return json(503, { error: "AI generation is temporarily unavailable." });
-    return json(502, { error: GENERIC_FAIL });
+    if (upstream.status === 429) return json(429, { error: "The AI service is busy. Try again in a moment.", code: "busy" });
+    if (upstream.status === 402) return json(503, { error: "AI generation is temporarily unavailable.", code: "unavailable" });
+    return json(502, { error: GENERIC_FAIL, code: "upstream" });
   }
 
   // The reservation stands once the provider has accepted the call; only the token count is settled below.
@@ -237,7 +237,7 @@ export async function POST(req: NextRequest) {
     if (body.mode !== "suggest") await settle(reservation, tokensUsed);
     if (rawOut.includes(canary)) {
       console.error("[guard] canary leak blocked", { subject: viewer.subject, mode: body.mode });
-      return json(422, { error: "That request couldn't be processed." });
+      return json(422, { error: "That request couldn't be processed.", code: "blocked" });
     }
     const cleaned = rawOut.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
     if (body.mode === "hints") {
@@ -287,7 +287,7 @@ export async function POST(req: NextRequest) {
         }
       }
       await settle(reservation, tokensUsed);
-      if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again." });
+      if (!Object.keys(values).length) return json(502, { error: "No suggestion produced. Try again.", code: "empty_output" });
       return json(200, { values });
     }
     try {
@@ -354,6 +354,8 @@ export async function POST(req: NextRequest) {
               if (evt.usage) tokens = evt.usage.total_tokens;
               const choice = evt?.choices?.[0];
               const delta: string | undefined = choice?.delta?.content;
+              // Read before the delta handling below, which can `continue` past it.
+              if (choice?.finish_reason) finish = choice.finish_reason;
               if (delta) {
                 full += delta;
                 if (holding) {
@@ -367,7 +369,6 @@ export async function POST(req: NextRequest) {
                 // Strip the canary if it arrives whole in one delta; split canaries are caught by the final check (output discarded).
                 emit(delta);
               }
-              if (choice?.finish_reason) finish = choice.finish_reason;
             } catch {
               /* keep-alive / partial */
             }
