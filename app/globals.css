@@ -127,6 +127,16 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
 .refine-row { display: flex; gap: 8px; }
 .refine-row textarea { min-height: 40px; }
 .err { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-text); padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; font-size: 13px; }
+.err-hint { display: block; margin-top: 3px; opacity: .85; }
+.err-note { display: flex; align-items: flex-start; gap: 10px; }
+.err-note .err-body { flex: 1; min-width: 0; }
+.err-note b { font-weight: 600; }
+.err-note.inset { margin: 12px 16px 0; }
+.err-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.err-acts .btn { color: var(--text); }
+.err-x { flex: none; border: 0; background: none; color: inherit; opacity: .7; cursor: pointer; padding: 4px; margin: -2px -4px 0 0; border-radius: 5px; display: grid; place-items: center; }
+.err-x:hover { opacity: 1; background: rgba(127,127,127,.2); }
+.err-x:focus-visible, .err-acts .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .note { color: var(--faint); font-size: 12px; }
 .foot { margin-top: 24px; color: var(--faint); font-size: 12px; text-align: center; }
 
