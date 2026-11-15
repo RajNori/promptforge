@@ -1,6 +1,8 @@
 // Prompt Forge domain: one brief, many frameworks. Registry, auto-pick, generator contracts,
 // validation, and an offline template compiler.
 
+import { UNCLEAR_MARKER } from "./objective";
+
 export type Target = "claude-code" | "cursor" | "codex" | "chat-llm" | "multi-agent" | "api-system";
 export type Autonomy = "ask-first" | "bounded" | "autonomous";
 export type Depth = "lean" | "standard" | "exhaustive";
@@ -55,10 +57,25 @@ export interface Clarification {
   suggestion?: string;
 }
 
+/** A concrete fact the result needs that only the user knows (name, date, venue…). Asked once, just before forging. */
+export interface MissingDetail {
+  label: string;
+  hint: string;
+}
+
 export interface Analysis {
   score: number;
   gaps: string[];
   questions: Clarification[];
+  details?: MissingDetail[];
+}
+
+/** Adds the user's filled-in details to the brief's context, so generation, refinement and history all keep them. */
+export function withDetails(b: Brief, filled: { label: string; value: string }[]): Brief {
+  const lines = filled.filter((d) => d.value.trim()).map((d) => `- ${d.label}: ${d.value.trim().replace(/\s+/g, " ")}`);
+  if (!lines.length) return b;
+  const block = `Key details:\n${lines.join("\n")}`;
+  return { ...b, context: (b.context.trim() ? `${b.context.trim()}\n\n${block}` : block).slice(0, 4000) };
 }
 
 export const TARGETS: { id: Target; label: string; hint: string }[] = [
@@ -450,13 +467,18 @@ For each question also give a suggested answer the person can accept as-is or ed
 
 Score reflects how well the brief captures the person's intent for THIS kind of task. Gaps are short, plain-language notes about missing intent, written for the person.
 
+Then list the key details: the concrete facts the finished result will need that the brief does not state and only the person knows — names, dates, times, places, amounts, prices, contact details, product or company names (e.g. for a birthday invite: child's name, age, party date and time, venue, RSVP contact). Only facts that would otherwise be left blank, guessed or worded vaguely in the final result; never taste, tone, length or format. Leave out anything already in the brief or already covered by one of your questions. At most 6, most important first; none if the brief already has them or the task needs none (most software and analysis tasks need none). Each has a short label in the person's terms and a format hint that is not a real-looking value (e.g. "day, date and start time", not "Saturday 14 June, 2pm").
+
+If the brief has no discernible task at all (the objective is random characters, keyboard mash or meaningless text, and nothing else in the brief says what they want), do not guess a task and do not ask questions: respond with exactly {"unclear": true}. Short, terse, misspelled, jargon-heavy or non-English objectives are NOT unclear; ask about them as usual.
+
 Respond with ONLY valid JSON, no prose, no code fences:
-{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}]}`;
+{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}], "details": [{"label": "short label", "hint": "format hint"}]}`;
 
 export function generateSystem(b: Brief): string {
   return `${PRIMER}
 
 You write production-grade prompts. Rules:
+0. If the brief has no discernible task at all (the objective is random characters, keyboard mash or meaningless text, and nothing else in the brief says what they want), output exactly ${UNCLEAR_MARKER} and nothing else. Never copy unintelligible text into the prompt or guess a task for it. Short, terse, misspelled, jargon-heavy or non-English objectives are not unclear; write the prompt as usual.
 1. Output ONLY the prompt${b.chain ? " chain" : ""}. No preamble, commentary, closing notes, or code fences around the whole thing.
 2. Fill every section with task-specific content. No placeholders like [X]; if a value must be supplied at runtime use {{UPPER_SNAKE}}.
 3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief. Treat any clarification about what would make the result unacceptable as success criteria and carry it into the acceptance checks.
