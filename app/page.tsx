@@ -31,7 +31,7 @@ import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, Temp
 import { Onboarding } from "./Onboarding";
 import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
-import { OBJECTIVE_EXAMPLE, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_FIELD_MSG, UNCLEAR_OBJECTIVE_MSG, isGibberishField, isGibberishObjective } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
@@ -194,6 +194,9 @@ function useAskFirst(): boolean {
   return on;
 }
 
+/** Optional text fields that get the gibberish check (the objective has its own, stricter one). */
+type GibField = "role" | "context" | "audience" | "tone" | "deliverable" | "successCriteria" | "rules" | "inputs" | "outputFormat";
+
 export default function Page() {
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF);
   const [stage, setStage] = useState<Stage>("brief");
@@ -208,6 +211,13 @@ export default function Page() {
   // Inline error on the objective field when it isn't a recognisable task (no prompt is generated).
   const [objErr, setObjErr] = useState("");
   useEffect(() => setObjErr(""), [brief.objective]);
+  // Gibberish in the other fields: flagged once typing pauses, or at once when a Simple-mode run is stopped by it.
+  const [settled, setSettled] = useState<Brief | null>(null);
+  const [gibForced, setGibForced] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(brief), 900);
+    return () => clearTimeout(t);
+  }, [brief]);
   const [feedback, setFeedback] = useState("");
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
@@ -369,6 +379,68 @@ export default function Page() {
   // fill list and the server's allowed list in step with what's visible, or ✦ on them fails as "Unknown field".
   const showAudienceTone = simple || fw.usesAudienceTone || !!brief.audience.trim() || !!brief.tone.trim();
   const blanks = applicableFields(effective, { audienceTone: showAudienceTone }).filter((f) => isEmpty(brief, f));
+  // Only the fields on screen in this mode are judged, so a Simple-mode user is never stopped by a hidden field.
+  const onScreen: GibField[] = ["context", "deliverable", "successCriteria", "rules"];
+  if (showAudienceTone) onScreen.push("audience", "tone");
+  if (!simple) onScreen.push("role", "inputs", "outputFormat");
+  const gibNow = onScreen.filter((f) =>
+    f === "rules" ? brief.rules.some((r) => isGibberishField(r.rule) || isGibberishField(r.why)) : isGibberishField(brief[f]),
+  );
+  // Wait for typing to pause so a half-typed word isn't flagged, unless a run was just stopped by it.
+  const gibFields = gibNow.filter(
+    (f) => gibForced || (f === "rules" ? JSON.stringify(settled?.rules) === JSON.stringify(brief.rules) : settled?.[f] === brief[f]),
+  );
+  useEffect(() => {
+    if (gibForced && !gibNow.length) setGibForced(false);
+  }, [gibForced, gibNow.length]);
+  const objectiveUsable = !!brief.objective.trim() && !isGibberishObjective(brief.objective);
+  /** Blank a flagged field (for Rules, only the rows that are mash). */
+  function clearGib(f: GibField) {
+    if (f === "rules")
+      setBrief((b) => {
+        const kept = b.rules.filter((r) => !isGibberishField(r.rule) && !isGibberishField(r.why));
+        return { ...b, rules: kept.length ? kept : [{ rule: "", why: "" }] };
+      });
+    else set(f, "");
+  }
+  const gibId = (f: GibField) => `${f}-gib`;
+  const gibAria = (f: GibField) => (gibFields.includes(f) ? { "aria-invalid": true, "aria-describedby": gibId(f) } : {});
+  /**
+   * Simple mode: a red line telling the user to say it in plain words (and runs stop until it's fixed).
+   * Advanced mode: a nudge to autofill it from the objective or leave it blank; runs aren't blocked.
+   */
+  const gib = (f: GibField) => {
+    if (!gibFields.includes(f)) return null;
+    const label = f === "rules" && simple ? "Must-dos & don'ts" : FIELD_HELP[f].label;
+    if (simple) {
+      const eg = f === "rules" ? "" : ph(f);
+      return (
+        <div className="err gib-err" id={gibId(f)} role="alert">
+          <span>
+            {UNCLEAR_FIELD_MSG} {eg.startsWith("e.g.") && <span style={{ opacity: 0.85 }}>{eg.split("\n")[0]}</span>}
+          </span>
+          <button className="btn ghost sm" onClick={() => clearGib(f)}>Clear</button>
+        </div>
+      );
+    }
+    const canFill = !!canAI && objectiveUsable;
+    return (
+      <div className="nudge-card" id={gibId(f)} role="status">
+        <div>
+          <b>{label} doesn&apos;t read as words.</b>{" "}
+          {canFill ? "Autofill it from your objective, or leave it blank." : "Leave it blank, or describe it in plain words."}
+        </div>
+        <div className="nudge-actions">
+          {canFill && (
+            <button className="btn primary sm" disabled={!!sparking || !!busy} onClick={() => suggest(f)}>
+              {StarIcon} {sparking === f ? "Filling…" : "Autofill from objective"}
+            </button>
+          )}
+          <button className={`btn ${canFill ? "ghost" : "primary"} sm`} onClick={() => clearGib(f)}>Leave it blank</button>
+        </div>
+      </div>
+    );
+  };
   // One-sentence brief: ask, don't auto-fill. Auto-fill guesses the facts only the user knows (eval: 47% of
   // success criteria met vs 91% after asking), so the questions become the way to fill the gaps.
   const asking = askFirst && !!canAI && !brief.context.trim() && !brief.successCriteria.trim();
@@ -465,8 +537,16 @@ export default function Page() {
 
   /** Loose browser-side pre-check; the server and the model have the final say. */
   function objectiveOk(): boolean {
-    if (!isGibberishObjective(brief.objective)) return true;
-    setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    const badObjective = isGibberishObjective(brief.objective);
+    // Simple mode also stops on mash in the other fields; Advanced users only get the nudge.
+    const badFields = simple && gibNow.length > 0;
+    if (!badObjective && !badFields) return true;
+    if (badObjective) setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    if (badFields) {
+      setGibForced(true);
+      // Take the user to the first field to fix.
+      setTimeout(() => document.getElementById(gibId(gibNow[0]))?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    }
     setStage("brief");
     return false;
   }
@@ -874,7 +954,8 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="role" label="AI's role" hint="optional" spark={spark("role")} />
-                  <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} />
+                  <input type="text" value={brief.role} maxLength={FIELD_MAX.role} onChange={(e) => set("role", e.target.value)} placeholder={ph("role")} {...gibAria("role")} />
+                  {gib("role")}
                 </div>
 
                 <div className="field">
@@ -939,18 +1020,21 @@ export default function Page() {
                     hint={fw.id === "bab" ? "what exists today, what's wrong" : ph("contextHint")}
                     spark={spark("context")}
                   />
-                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} />
+                  <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} {...gibAria("context")} />
+                  {gib("context")}
                 </div>
 
                 {showAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
-                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience")} />
+                      <input type="text" value={brief.audience} maxLength={FIELD_MAX.audience} onChange={(e) => set("audience", e.target.value)} placeholder={ph("audience")} {...gibAria("audience")} />
+                  {gib("audience")}
                     </div>
                     <div className="field">
                       <FieldLabel field="tone" label="Tone" hint={simple ? "how it should sound" : fw.name} spark={spark("tone")} />
-                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone")} />
+                      <input type="text" value={brief.tone} maxLength={FIELD_MAX.tone} onChange={(e) => set("tone", e.target.value)} placeholder={ph("tone")} {...gibAria("tone")} />
+                  {gib("tone")}
                     </div>
                   </div>
                 )}
@@ -958,11 +1042,13 @@ export default function Page() {
                 <div className="row">
                   <div className="field">
                     <FieldLabel field="deliverable" label="Deliverable" spark={spark("deliverable")} />
-                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable")} />
+                    <textarea rows={2} value={brief.deliverable} maxLength={FIELD_MAX.deliverable} onChange={(e) => set("deliverable", e.target.value)} placeholder={ph("deliverable")} {...gibAria("deliverable")} />
+                  {gib("deliverable")}
                   </div>
                   <div className="field">
                     <FieldLabel field="successCriteria" label="Success criteria" hint="one per line" spark={spark("successCriteria")} />
-                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria")} />
+                    <textarea rows={2} value={brief.successCriteria} maxLength={FIELD_MAX.successCriteria} onChange={(e) => set("successCriteria", e.target.value)} placeholder={ph("successCriteria")} {...gibAria("successCriteria")} />
+                  {gib("successCriteria")}
                   </div>
                 </div>
 
@@ -987,6 +1073,7 @@ export default function Page() {
                       + Add rule
                     </button>
                   </div>
+                  {gib("rules")}
                 </div>
 
                 {isApi && (
@@ -1061,11 +1148,13 @@ export default function Page() {
                   <div className="row">
                     <div className="field">
                       <FieldLabel field="inputs" label="Inputs / assets" spark={spark("inputs")} />
-                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder={ph("inputs")} />
+                      <textarea rows={2} value={brief.inputs} maxLength={FIELD_MAX.inputs} onChange={(e) => set("inputs", e.target.value)} placeholder={ph("inputs")} {...gibAria("inputs")} />
+                  {gib("inputs")}
                     </div>
                     <div className="field">
                       <FieldLabel field="outputFormat" label="Response format" spark={spark("outputFormat")} />
-                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder={ph("outputFormat")} />
+                      <textarea rows={2} value={brief.outputFormat} maxLength={FIELD_MAX.outputFormat} onChange={(e) => set("outputFormat", e.target.value)} placeholder={ph("outputFormat")} {...gibAria("outputFormat")} />
+                  {gib("outputFormat")}
                     </div>
                   </div>
                   <div className="row">

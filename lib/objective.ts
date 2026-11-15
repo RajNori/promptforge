@@ -73,3 +73,34 @@ export function isGibberishObjective(raw: string): boolean {
   // No common word at all: block if most substantial tokens look like mash.
   return judged.filter(mashed).length * 2 > judged.length;
 }
+
+/** Shown under a non-objective field when its text doesn't read as words (Simple mode). */
+export const UNCLEAR_FIELD_MSG = "This doesn't read as words. Write it in plain language, or clear it.";
+
+/**
+ * Same idea as isGibberishObjective, but for the optional fields. Looser: short values ("formal", "Q3",
+ * "18-25", "≤ 200 words") are normal here, so only all-mash text and pure punctuation are flagged.
+ */
+export function isGibberishField(raw: string): boolean {
+  const text = raw.normalize("NFC").trim();
+  if (!text) return false;
+  if (!/\p{L}/u.test(text)) return !/\d/.test(text); // "???", "..." — but numbers like "18-25" are real answers
+  if (/[^\p{Script=Latin}\P{L}]/u.test(text)) return false;
+  const tokens = text.toLowerCase().match(/\p{L}+/gu) ?? [];
+  if (tokens.some((t) => COMMON.has(t))) return false;
+  const judged = tokens.filter((t) => t.length >= 4);
+  if (tokens.length >= 2 && new Set(tokens).size === 1 && judged.length) return true; // "asdf asdf"
+  return judged.length > 0 && judged.every(fieldMashed);
+}
+
+// Conservative mash test for single-word field values, where mashed()'s pair rules would flag real words
+// ("liberty", "assassin", "blackjack"). 41 of ~275k English words trip it on their own.
+const FIELD_KEY_RUNS = ["qwer", "rtyu", "tyui", "yuio", "uiop", "asdf", "sdfg", "dfgh", "fghj", "ghjk", "hjkl", "zxcv", "xcvb", "cvbn", "vbnm"];
+function fieldMashed(token: string): boolean {
+  const t = token.toLowerCase();
+  if (/(.)\1{3,}/.test(t)) return true; // "kkkkk"
+  if (/(..)\1{2,}/.test(t)) return true; // "jkjkjk"
+  if (FIELD_KEY_RUNS.some((k) => t.includes(k))) return true; // "asdf", "zxcv" ("wert"/"erty" left out: "powertrain", "property")
+  if (new RegExp(`[^${V}]{6,}`).test(t)) return true; // "sjfljsdlkfjs"
+  return t.length >= 18 && [...t].filter((c) => VOWEL.test(c)).length / t.length < 0.25;
+}
