@@ -8,7 +8,6 @@ import {
   TARGETS,
   TASK_TYPES,
   autoPick,
-  compileTemplate,
   migrateBrief,
   missingSections,
   resolveFramework,
@@ -32,7 +31,7 @@ import { ACTION_LABEL, RequestError, fromException, fromResponse, fromStreamStat
 import { Onboarding } from "./Onboarding";
 import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
-import { OBJECTIVE_EXAMPLE, UNCLEAR_FIELD_MSG, UNCLEAR_OBJECTIVE_MSG, isGibberishField, isGibberishObjective, withoutGibberish } from "@/lib/objective";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_FIELD_MSG, UNCLEAR_OBJECTIVE_MSG, isGibberishField, isGibberishObjective } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
@@ -900,13 +899,22 @@ export default function Page() {
     }
   }
 
-  function instant(clar: Clarification[] = answers) {
-    // The no-AI template pastes the objective verbatim, so never build one from keyboard mash.
+  /** Quick draft (no AI). Built on the server so it passes the same input checks as every AI path. */
+  async function instant(clar: Clarification[] = answers) {
     if (!objectiveOk()) return;
     setErrorState(null);
-    setLeftOut(gibNow);
-    pushVersion(compileTemplate(withoutGibberish(effective), clar), `${fw.name} template`);
-    setStage("forge");
+    try {
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "template", brief, clarifications: clar, persona: profile?.persona }) });
+      const d = await readJson(r);
+      if (!r.ok) throw new RequestError(fromResponse(r.status, d, "template"));
+      if (typeof d.text !== "string" || !d.text.trim()) throw new RequestError(fromResponse(502, { code: "empty_output" }, "template"));
+      setLeftOut(gibNow);
+      await pushVersion(d.text, `${fw.name} template`);
+      setStage("forge");
+    } catch (e) {
+      const f = e instanceof RequestError ? e.friendly : fromException(e);
+      if (f) setError(f);
+    }
   }
 
   async function copy() {

@@ -5,6 +5,8 @@
  * like "Request failed (500)" or a JSON parse error.
  */
 
+import { OBJECTIVE_EXAMPLE, UNCLEAR_OBJECTIVE_MSG } from "./objective";
+
 export type ErrorAction = "retry" | "lean" | "instant" | "signin" | "pro" | "edit-objective" | "edit-feedback";
 
 /** Where the problem is: a field gets the message under it; anything else shows beside the action that failed. */
@@ -20,7 +22,7 @@ export type FriendlyError = {
   actions: ErrorAction[];
 };
 
-export type Mode = "analyze" | "generate" | "refine" | "suggest" | "hints";
+export type Mode = "analyze" | "generate" | "refine" | "suggest" | "hints" | "template";
 
 const BUSY_AI: FriendlyError = {
   code: "busy",
@@ -55,6 +57,8 @@ function fromCode(code: string, serverMsg: string, mode: Mode): FriendlyError | 
   switch (code) {
     case "objective_required":
       return { code, msg: "Add an objective first.", hint: "Say what the prompt should get done, in one sentence.", field: "objective", actions: ["edit-objective"] };
+    case "unclear_objective":
+      return { code, msg: UNCLEAR_OBJECTIVE_MSG, hint: OBJECTIVE_EXAMPLE, field: "objective", actions: ["edit-objective"] };
     case "objective_short":
       return { code, msg: "That objective is too short to work with.", hint: "Add a few words about the task, who it's for or what the result is.", field: "objective", actions: ["edit-objective"] };
     case "no_signal":
