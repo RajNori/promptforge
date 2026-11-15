@@ -31,6 +31,7 @@ import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, Temp
 import { Onboarding } from "./Onboarding";
 import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
@@ -204,6 +205,9 @@ export default function Page() {
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
   const [error, setError] = useState("");
+  // Inline error on the objective field when it isn't a recognisable task (no prompt is generated).
+  const [objErr, setObjErr] = useState("");
+  useEffect(() => setObjErr(""), [brief.objective]);
   const [feedback, setFeedback] = useState("");
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
@@ -452,6 +456,14 @@ export default function Page() {
     return { id, missing };
   }
 
+  /** Loose browser-side pre-check; the server and the model have the final say. */
+  function objectiveOk(): boolean {
+    if (!isGibberishObjective(brief.objective)) return true;
+    setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    setStage("brief");
+    return false;
+  }
+
   async function stream(body: object): Promise<string | null> {
     abortRef.current?.abort();
     const ctrl = new AbortController();
@@ -464,6 +476,11 @@ export default function Page() {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ ...body, persona: profile?.persona }), signal: ctrl.signal });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
+        if (d.code === "unclear_objective") {
+          setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+          setStage("brief");
+          return null;
+        }
         throw new Error(d.error || `Request failed (${r.status})`);
       }
       const reader = r.body!.getReader();
@@ -478,6 +495,11 @@ export default function Page() {
       const eot = acc.lastIndexOf("\u0004");
       if (eot < 0) throw new Error("Generation was cut off before it finished. Try again — or use Lean depth for faster results.");
       const status = acc.slice(eot + 1);
+      if (status === "unclear") {
+        setObjErr(UNCLEAR_OBJECTIVE_MSG);
+        setStage("brief");
+        return null;
+      }
       const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
       if (!clean) throw new Error("Empty response. Please try again.");
       if (status === "blocked") throw new Error("That request couldn't be processed. Rephrase your brief and try again.");
@@ -612,12 +634,17 @@ export default function Page() {
 
   async function analyze() {
     setError("");
+    if (!objectiveOk()) return;
     if (!canAI) return instant();
     persistPrefs();
     setBusy("analyze");
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
       const d = await r.json();
+      if (d?.code === "unclear_objective") {
+        setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+        return;
+      }
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
       detailsAsked.current = null;
@@ -658,6 +685,7 @@ export default function Page() {
 
   async function generate(clar: Clarification[] = answers, b: Brief = brief) {
     setError("");
+    if (!objectiveOk()) return;
     if (!canAI) return instant(clar);
     persistPrefs();
     setBusy("generate");
@@ -710,6 +738,8 @@ export default function Page() {
   }
 
   function instant(clar: Clarification[] = answers) {
+    // The no-AI template pastes the objective verbatim, so never build one from keyboard mash.
+    if (!objectiveOk()) return;
     pushVersion(compileTemplate(effective, clar), `${fw.name} template`);
     setStage("forge");
   }
@@ -865,7 +895,20 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
-                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective")} />
+                  <textarea
+                    rows={3}
+                    value={brief.objective}
+                    maxLength={FIELD_MAX.objective}
+                    onChange={(e) => set("objective", e.target.value)}
+                    placeholder={ph("objective")}
+                    aria-invalid={!!objErr}
+                    aria-describedby={objErr ? "objective-err" : undefined}
+                  />
+                  {objErr && (
+                    <div className="err" id="objective-err" role="alert" style={{ margin: "6px 0 0" }}>
+                      {objErr} <span style={{ opacity: 0.85 }}>{OBJECTIVE_EXAMPLE}</span>
+                    </div>
+                  )}
                   {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
                   {staleTemplateFields.length > 0 && (
                     <div className="nudge-card" role="status">
