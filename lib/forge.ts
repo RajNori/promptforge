@@ -1,6 +1,8 @@
 // Prompt Forge domain: one brief, many frameworks. Registry, auto-pick, generator contracts,
 // validation, and an offline template compiler.
 
+import { UNCLEAR_MARKER } from "./objective";
+
 export type Target = "claude-code" | "cursor" | "codex" | "chat-llm" | "multi-agent" | "api-system";
 export type Autonomy = "ask-first" | "bounded" | "autonomous";
 export type Depth = "lean" | "standard" | "exhaustive";
@@ -51,12 +53,29 @@ export interface Clarification {
   question: string;
   why: string;
   answer?: string;
+  /** The model's best-guess answer, pre-filled for the user to accept or edit. Empty for facts only they know. */
+  suggestion?: string;
+}
+
+/** A concrete fact the result needs that only the user knows (name, date, venue…). Asked once, just before forging. */
+export interface MissingDetail {
+  label: string;
+  hint: string;
 }
 
 export interface Analysis {
   score: number;
   gaps: string[];
   questions: Clarification[];
+  details?: MissingDetail[];
+}
+
+/** Adds the user's filled-in details to the brief's context, so generation, refinement and history all keep them. */
+export function withDetails(b: Brief, filled: { label: string; value: string }[]): Brief {
+  const lines = filled.filter((d) => d.value.trim()).map((d) => `- ${d.label}: ${d.value.trim().replace(/\s+/g, " ")}`);
+  if (!lines.length) return b;
+  const block = `Key details:\n${lines.join("\n")}`;
+  return { ...b, context: (b.context.trim() ? `${b.context.trim()}\n\n${block}` : block).slice(0, 4000) };
 }
 
 export const TARGETS: { id: Target; label: string; hint: string }[] = [
@@ -440,20 +459,29 @@ What to ask about — the person's intent and content, in their own domain:
 - Taste: tone, length, format, what good looks like, what to avoid.
 - For software tasks only: scope boundaries, environment facts, risky operations, acceptance criteria.
 
+Always make one of your questions ask how they will judge the result: what would make them send it back or reject it, phrased for this task in their own terms (e.g. "What would make you rewrite this email before sending it?"). Skip it only if the brief already lists clear success criteria. This answer becomes the success criteria, so it matters more than any other question.
+
 Never ask about prompt mechanics or tooling — framework, chain steps, autonomy, evidence, files, repositories or how the AI should work. Those are your job, not theirs. Never ask about software, files or code for a non-software task.
+
+For each question also give a suggested answer the person can accept as-is or edit: the most likely answer for this task, in their voice, one line. Suggest only what a sensible default can cover (tone, length, format, audience type, what would make them reject it). If the answer is a fact only they know (names, numbers, dates, prices, their situation), leave the suggestion empty, because a guessed fact accepted without reading ends up in their real work.
 
 Score reflects how well the brief captures the person's intent for THIS kind of task. Gaps are short, plain-language notes about missing intent, written for the person.
 
+Then list the key details: the concrete facts the finished result will need that the brief does not state and only the person knows — names, dates, times, places, amounts, prices, contact details, product or company names (e.g. for a birthday invite: child's name, age, party date and time, venue, RSVP contact). Only facts that would otherwise be left blank, guessed or worded vaguely in the final result; never taste, tone, length or format. Leave out anything already in the brief or already covered by one of your questions. At most 6, most important first; none if the brief already has them or the task needs none (most software and analysis tasks need none). Each has a short label in the person's terms and a format hint that is not a real-looking value (e.g. "day, date and start time", not "Saturday 14 June, 2pm").
+
+If the brief has no discernible task at all (the objective is random characters, keyboard mash or meaningless text, and nothing else in the brief says what they want), do not guess a task and do not ask questions: respond with exactly {"unclear": true}. Short, terse, misspelled, jargon-heavy or non-English objectives are NOT unclear; ask about them as usual.
+
 Respond with ONLY valid JSON, no prose, no code fences:
-{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters"}]}`;
+{"score": <0-100 completeness>, "gaps": ["short gap", ...], "questions": [{"question": "...", "why": "one short clause on why it matters", "suggestion": "suggested answer, or empty"}], "details": [{"label": "short label", "hint": "format hint"}]}`;
 
 export function generateSystem(b: Brief): string {
   return `${PRIMER}
 
 You write production-grade prompts. Rules:
+0. If the brief has no discernible task at all (the objective is random characters, keyboard mash or meaningless text, and nothing else in the brief says what they want), output exactly ${UNCLEAR_MARKER} and nothing else. Never copy unintelligible text into the prompt or guess a task for it. Short, terse, misspelled, jargon-heavy or non-English objectives are not unclear; write the prompt as usual.
 1. Output ONLY the prompt${b.chain ? " chain" : ""}. No preamble, commentary, closing notes, or code fences around the whole thing.
 2. Fill every section with task-specific content. No placeholders like [X]; if a value must be supplied at runtime use {{UPPER_SNAKE}}.
-3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief.
+3. Infer expert defaults for HOW to do the task (approach, structure, checks); never contradict the brief. Treat any clarification about what would make the result unacceptable as success criteria and carry it into the acceptance checks.
 4. Never invent FACTS about the user's situation: no names, numbers, dates, times, causes, technical internals or requirements the brief doesn't state. Computing from the facts given is expected (totals, comparisons, conversions). Tell the model the same, and tell it the output must be usable as-is: where a detail is missing, use neutral wording that stays true (e.g. "your line manager", "the support inbox") or state one short assumption — never leave "[to confirm]"-style blanks — because invented specifics end up in the user's real work and blanks make it unusable.
 5. Keep the user's commitments and scope exactly as stated: never strengthen, broaden or soften them (e.g. "not in 2027" must not become "never").
 6. Respect the user's limits on length and format above your own structure. Ask for ONE finished deliverable, not variants or options, unless the user asked for options. Do not ask for extras the user didn't request (assumptions sections, explanations, summaries, worked examples) — because extras push the output past the user's limits and bury what they asked for.
@@ -586,6 +614,8 @@ function compileOne(b: Brief, fw: Framework, clarifications: Clarification[]): s
     switch (ext.label) {
       case "Examples": {
         const ex = activeExamples(b);
+        // No examples given: leave the section out rather than ship {{…}} blanks the user has to notice and fill.
+        if (!ex.length) break;
         const body = ex.length
           ? `<examples>\n${ex.map((e) => `<example>\n<input>\n${e.input.trim()}\n</input>\n<output>\n${e.output.trim()}\n</output>\n</example>`).join("\n")}\n</examples>`
           : "<examples>\n<example>{{GOOD_EXAMPLE}}</example>\n<example>{{BAD_EXAMPLE — and why it fails}}</example>\n</examples>";
@@ -593,7 +623,7 @@ function compileOne(b: Brief, fw: Framework, clarifications: Clarification[]): s
         break;
       }
       case "Acceptance Criteria":
-        parts.push(section(ext.label, b.successCriteria ? bullets(b.successCriteria).replace(/^- /gm, "- [ ] ") : "- [ ] {{ACCEPTANCE_CRITERIA}}"));
+        parts.push(section(ext.label, b.successCriteria ? bullets(b.successCriteria).replace(/^- /gm, "- [ ] ") : `- [ ] ${b.objective.trim().replace(/\.$/, "")}: done as asked, nothing out of scope\n- [ ] Every completion claim is backed by evidence (command output, test results or file paths)`));
         break;
       case "Authority Boundaries":
         parts.push(

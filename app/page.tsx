@@ -19,6 +19,8 @@ import {
   type Brief,
   type Clarification,
   type Example,
+  type MissingDetail,
+  withDetails,
   type Rule,
 } from "@/lib/forge";
 import { Select } from "./Select";
@@ -27,7 +29,9 @@ import { useBriefSync, useHistory } from "./useHistory";
 import { LIMITS, cleanText } from "@/lib/sanitize";
 import { FieldLabel, ForgeLoader, Sparkle, Spinner, StarIcon, TemplateMenu, TemplateStrip } from "./ui";
 import { Onboarding } from "./Onboarding";
+import { MissingDetails } from "./MissingDetails";
 import { useProfile } from "./useProfile";
+import { OBJECTIVE_EXAMPLE, UNCLEAR_OBJECTIVE_MSG, isGibberishObjective } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
 import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
@@ -173,14 +177,37 @@ const X = (
   </svg>
 );
 
+/**
+ * Ask-first for one-sentence briefs. On by default; NEXT_PUBLIC_ASK_FIRST=0 turns it off for everyone.
+ * `?ask=1` / `?ask=0` overrides it for one browser (remembered), so testers can be opted in or out by link.
+ */
+function useAskFirst(): boolean {
+  const [on, setOn] = useState(process.env.NEXT_PUBLIC_ASK_FIRST !== "0");
+  useEffect(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get("ask");
+      if (q === "1" || q === "0") localStorage.setItem("risen-forge:ask", q);
+      const v = localStorage.getItem("risen-forge:ask");
+      if (v === "1" || v === "0") setOn(v === "1");
+    } catch {}
+  }, []);
+  return on;
+}
+
 export default function Page() {
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF);
   const [stage, setStage] = useState<Stage>("brief");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [answers, setAnswers] = useState<Clarification[]>([]);
+  /** Missing-details dialog: open with the facts still missing for this analysis; asked once per analysis. */
+  const [detailsAsk, setDetailsAsk] = useState<{ details: MissingDetail[]; clar: Clarification[] } | null>(null);
+  const detailsAsked = useRef<Analysis | null>(null);
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState<null | "analyze" | "generate" | "refine" | "repair">(null);
   const [error, setError] = useState("");
+  // Inline error on the objective field when it isn't a recognisable task (no prompt is generated).
+  const [objErr, setObjErr] = useState("");
+  useEffect(() => setObjErr(""), [brief.objective]);
   const [feedback, setFeedback] = useState("");
   const [copied, setCopied] = useState(false);
   const [server, setServer] = useState<{ configured: boolean; requiresAccessCode: boolean } | null>(null);
@@ -221,6 +248,7 @@ export default function Page() {
     if (profile) saveProfile({ ...profile, mode: m });
   };
   const simple = mode === "simple";
+  const askFirst = useAskFirst();
   const per = personaOf(profile?.persona);
   const nonDev = !!profile && profile.persona !== "developer";
   // Live, objective-tailored examples win; fixed task-type examples are only the fallback.
@@ -330,7 +358,13 @@ export default function Page() {
   const ready = brief.objective.trim().length > 8;
   const isApi = brief.target === "api-system";
   const signal = hasSignal(brief);
-  const blanks = applicableFields(effective).filter((f) => isEmpty(brief, f));
+  // Audience/Tone are on screen in Simple mode (or once filled) even when the framework doesn't need them; keep the
+  // fill list and the server's allowed list in step with what's visible, or ✦ on them fails as "Unknown field".
+  const showAudienceTone = simple || fw.usesAudienceTone || !!brief.audience.trim() || !!brief.tone.trim();
+  const blanks = applicableFields(effective, { audienceTone: showAudienceTone }).filter((f) => isEmpty(brief, f));
+  // One-sentence brief: ask, don't auto-fill. Auto-fill guesses the facts only the user knows (eval: 47% of
+  // success criteria met vs 91% after asking), so the questions become the way to fill the gaps.
+  const asking = askFirst && !!canAI && !brief.context.trim() && !brief.successCriteria.trim();
   const spark = (f: SuggestField) =>
     canAI ? (
       <Sparkle
@@ -422,6 +456,14 @@ export default function Page() {
     return { id, missing };
   }
 
+  /** Loose browser-side pre-check; the server and the model have the final say. */
+  function objectiveOk(): boolean {
+    if (!isGibberishObjective(brief.objective)) return true;
+    setObjErr(UNCLEAR_OBJECTIVE_MSG);
+    setStage("brief");
+    return false;
+  }
+
   async function stream(body: object): Promise<string | null> {
     abortRef.current?.abort();
     const ctrl = new AbortController();
@@ -434,6 +476,11 @@ export default function Page() {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ ...body, persona: profile?.persona }), signal: ctrl.signal });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
+        if (d.code === "unclear_objective") {
+          setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+          setStage("brief");
+          return null;
+        }
         throw new Error(d.error || `Request failed (${r.status})`);
       }
       const reader = r.body!.getReader();
@@ -448,6 +495,11 @@ export default function Page() {
       const eot = acc.lastIndexOf("\u0004");
       if (eot < 0) throw new Error("Generation was cut off before it finished. Try again — or use Lean depth for faster results.");
       const status = acc.slice(eot + 1);
+      if (status === "unclear") {
+        setObjErr(UNCLEAR_OBJECTIVE_MSG);
+        setStage("brief");
+        return null;
+      }
       const clean = acc.slice(0, eot).replace(/^```[a-z]*\n?|\n?```\s*$/g, "").trim();
       if (!clean) throw new Error("Empty response. Please try again.");
       if (status === "blocked") throw new Error("That request couldn't be processed. Rephrase your brief and try again.");
@@ -465,7 +517,7 @@ export default function Page() {
   }
 
   /** Validate the framework contract; auto-repair once if headings are missing. */
-  async function finish(res: string | null, label: string) {
+  async function finish(res: string | null, label: string, b: Brief = brief) {
     if (!res) return;
     const { id, missing } = await pushVersion(res, label);
     if (missing.length) {
@@ -473,7 +525,7 @@ export default function Page() {
       const fixed = await stream({
         mode: "refine",
         auto: true,
-        brief,
+        brief: b,
         prompt: res,
         feedback: `The prompt violates the ${fw.name} output contract. Restore these missing required sections with proper headings, in the correct order, without removing anything else: ${missing.join(", ")}.`,
       });
@@ -496,7 +548,7 @@ export default function Page() {
     setSparking(field);
     const prev = brief;
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, persona: profile?.persona }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Suggestion failed");
       refreshMe();
@@ -582,18 +634,25 @@ export default function Page() {
 
   async function analyze() {
     setError("");
+    if (!objectiveOk()) return;
     if (!canAI) return instant();
     persistPrefs();
     setBusy("analyze");
     try {
       const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
       const d = await r.json();
+      if (d?.code === "unclear_objective") {
+        setObjErr(d.error || UNCLEAR_OBJECTIVE_MSG);
+        return;
+      }
       if (!r.ok) throw new Error(d.error || "Analysis failed");
       setAnalysis(d);
-      setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: "" })));
+      detailsAsked.current = null;
+      // Suggested answers are pre-filled so the user can accept or edit; facts only they know come back empty.
+      setAnswers((d.questions as Clarification[]).map((q) => ({ ...q, answer: q.suggestion ?? "" })));
       if (!d.questions?.length) {
         setBusy(null);
-        await generate([]);
+        await forge([], d);
         return;
       }
       setStage("clarify");
@@ -604,13 +663,34 @@ export default function Page() {
     }
   }
 
-  async function generate(clar: Clarification[] = answers) {
+  /** Forge after analysis: first ask once for the key facts still missing (name, date…), all optional. */
+  async function forge(clar: Clarification[] = answers, a: Analysis | null = analysis) {
+    const details = a?.details ?? [];
+    if (canAI && a && details.length && detailsAsked.current !== a) {
+      detailsAsked.current = a;
+      setDetailsAsk({ details, clar });
+      return;
+    }
+    await generate(clar);
+  }
+
+  async function addDetails(filled: { label: string; value: string }[]) {
+    const clar = detailsAsk?.clar ?? answers;
+    setDetailsAsk(null);
+    const next = withDetails(brief, filled);
+    // Into the brief itself (Context), so refinements, history and the next forge keep the facts.
+    if (next !== brief) setBrief(next);
+    await generate(clar, next);
+  }
+
+  async function generate(clar: Clarification[] = answers, b: Brief = brief) {
     setError("");
+    if (!objectiveOk()) return;
     if (!canAI) return instant(clar);
     persistPrefs();
     setBusy("generate");
     try {
-      await finish(await stream({ mode: "generate", brief, clarifications: clar }), `${fw.name}${brief.chain ? " chain" : ""}`);
+      await finish(await stream({ mode: "generate", brief: b, clarifications: clar }), `${fw.name}${b.chain ? " chain" : ""}`, b);
     } finally {
       setBusy(null);
     }
@@ -658,6 +738,8 @@ export default function Page() {
   }
 
   function instant(clar: Clarification[] = answers) {
+    // The no-AI template pastes the objective verbatim, so never build one from keyboard mash.
+    if (!objectiveOk()) return;
     pushVersion(compileTemplate(effective, clar), `${fw.name} template`);
     setStage("forge");
   }
@@ -813,7 +895,20 @@ export default function Page() {
 
                 <div className="field">
                   <FieldLabel field="objective" label="Objective" required hint="what must be accomplished" spark={spark("objective")} />
-                  <textarea rows={3} value={brief.objective} maxLength={FIELD_MAX.objective} onChange={(e) => set("objective", e.target.value)} placeholder={ph("objective")} />
+                  <textarea
+                    rows={3}
+                    value={brief.objective}
+                    maxLength={FIELD_MAX.objective}
+                    onChange={(e) => set("objective", e.target.value)}
+                    placeholder={ph("objective")}
+                    aria-invalid={!!objErr}
+                    aria-describedby={objErr ? "objective-err" : undefined}
+                  />
+                  {objErr && (
+                    <div className="err" id="objective-err" role="alert" style={{ margin: "6px 0 0" }}>
+                      {objErr} <span style={{ opacity: 0.85 }}>{OBJECTIVE_EXAMPLE}</span>
+                    </div>
+                  )}
                   {hintsActive && <p className="note hint-note">{StarIcon} Examples in the fields below are tailored to your objective</p>}
                   {staleTemplateFields.length > 0 && (
                     <div className="nudge-card" role="status">
@@ -839,7 +934,7 @@ export default function Page() {
                   <textarea rows={3} value={brief.context} maxLength={FIELD_MAX.context} onChange={(e) => set("context", e.target.value)} placeholder={ph("context")} />
                 </div>
 
-                {(simple || fw.usesAudienceTone || brief.audience || brief.tone) && (
+                {showAudienceTone && (
                   <div className="row reveal">
                     <div className="field">
                       <FieldLabel field="audience" label="Audience" hint={simple ? "who it's for" : fw.name} spark={spark("audience")} />
@@ -1030,7 +1125,7 @@ export default function Page() {
                         <Spinner /> Analysing brief…
                       </>
                     ) : canAI ? (
-                      "Analyse & ask questions →"
+                      asking ? "Ask me a few questions →" : "Analyse & ask questions →"
                     ) : (
                       "Generate →"
                     )}
@@ -1054,7 +1149,9 @@ export default function Page() {
                     </button>
                   )}
                 </div>
-                {!ready && <p className="note">Write an objective to continue{canAI ? " — or add some context and use ✦ to draft it" : ""}.</p>}
+                {server && !canAI && <p className="note">AI generation isn&apos;t available right now, so this builds a template from your brief. Add context and success criteria for a better result.</p>}
+                {!ready && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
+                {ready && asking && <p className="note">One sentence is enough. Answer a few quick questions and your answers become the context and success criteria.</p>}
               </>
             )}
 
@@ -1077,20 +1174,23 @@ export default function Page() {
                 {answers.map((q, i) => (
                   <div className="q" key={i}>
                     <p>{q.question}</p>
-                    <small>{q.why}</small>
+                    <small>
+                      {q.why}
+                      {q.suggestion && q.answer === q.suggestion ? " · suggested answer, edit it if it's not right" : ""}
+                    </small>
                     <input
                       type="text"
                       value={q.answer}
                       maxLength={LIMITS.answer}
                       onChange={(e) => setAnswers((a) => a.map((x, j) => (j === i ? { ...x, answer: e.target.value } : x)))}
-                      onKeyDown={(e) => e.key === "Enter" && i === answers.length - 1 && generate()}
+                      onKeyDown={(e) => e.key === "Enter" && i === answers.length - 1 && !busy && forge()}
                       placeholder="Answer, or leave blank to let the model decide"
                       autoFocus={i === 0}
                     />
                   </div>
                 ))}
                 <div className="actions">
-                  <button className="btn primary" disabled={!!busy} onClick={() => generate()}>
+                  <button className="btn primary" disabled={!!busy} onClick={() => forge()}>
                     {busy === "generate" ? (
                       <>
                         <Spinner /> Forging…
@@ -1232,6 +1332,18 @@ export default function Page() {
             ×
           </button>
         </div>
+      )}
+      {detailsAsk && (
+        <MissingDetails
+          details={detailsAsk.details}
+          busy={!!busy}
+          onSubmit={addDetails}
+          onSkip={() => {
+            const clar = detailsAsk.clar;
+            setDetailsAsk(null);
+            generate(clar);
+          }}
+        />
       )}
       {(obOpen || needsOnboarding) && (
         <Onboarding
