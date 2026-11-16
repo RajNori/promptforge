@@ -57,6 +57,8 @@ function fromCode(code: string, serverMsg: string, mode: Mode): FriendlyError | 
   switch (code) {
     case "objective_required":
       return { code, msg: "Add an objective first.", hint: "Say what the prompt should get done, in one sentence.", field: "objective", actions: ["edit-objective"] };
+    case "unclear_fields":
+      return { code, msg: "Some fields don't read as words.", hint: "Write them in plain language, or clear them.", actions: [] };
     case "unclear_objective":
       return { code, msg: UNCLEAR_OBJECTIVE_MSG, hint: OBJECTIVE_EXAMPLE, field: "objective", actions: ["edit-objective"] };
     case "objective_short":

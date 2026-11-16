@@ -219,6 +219,8 @@ export default function Page() {
   const [gibForced, setGibForced] = useState(false);
   // Fields left out of the last prompt because they were still mash (Advanced lets people run past the nudge).
   const [leftOut, setLeftOut] = useState<GibField[]>([]);
+  // Fields the server's model check called junk, with the value it judged (the flag clears once it's edited).
+  const [junk, setJunk] = useState<Partial<Record<GibField, string>>>({});
   useEffect(() => {
     const t = setTimeout(() => setSettled(brief), 900);
     return () => clearTimeout(t);
@@ -395,7 +397,9 @@ export default function Page() {
   if (showAudienceTone) onScreen.push("audience", "tone");
   if (!simple) onScreen.push("role", "inputs", "outputFormat");
   const gibNow = onScreen.filter((f) =>
-    f === "rules" ? brief.rules.some((r) => isGibberishField(r.rule) || isGibberishField(r.why)) : isGibberishField(brief[f]),
+    f === "rules"
+      ? brief.rules.some((r) => isGibberishField(r.rule) || isGibberishField(r.why))
+      : isGibberishField(brief[f]) || (junk[f] !== undefined && junk[f] === brief[f]),
   );
   // Wait for typing to pause so a half-typed word isn't flagged, unless a run was just stopped by it.
   const gibFields = gibNow.filter(
@@ -565,6 +569,23 @@ export default function Page() {
     return false;
   }
 
+  /** Simple mode: the server's model check found fields that aren't words. Flag them like the instant check does. */
+  function stopOnJunk(d: Record<string, unknown>): boolean {
+    if (d.code !== "unclear_fields" || !Array.isArray(d.fields)) return false;
+    const flagged = (d.fields as string[]).filter((f): f is GibField => f in FIELD_HELP && f !== "rules");
+    if (!flagged.length) return false;
+    setJunk(Object.fromEntries(flagged.map((f) => [f, brief[f as Exclude<GibField, "rules">]])));
+    setGibForced(true);
+    setStage("brief");
+    setTimeout(() => document.getElementById(gibId(flagged[0]))?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    return true;
+  }
+  /** Advanced mode: fields the server left out (model check) join the ones the instant check left out. */
+  function noteLeftOut(r: Response) {
+    const named = (r.headers.get("x-left-out") ?? "").split(",").filter((f): f is GibField => f in FIELD_HELP);
+    if (named.length) setLeftOut((prev) => [...new Set([...prev, ...named])]);
+  }
+
   /** Show a request error; field errors go under their field instead of in a panel. */
   function setError(f: FriendlyError | null, where: "brief" | "output" = "brief") {
     if (!f) return setErrorState(null);
@@ -619,8 +640,10 @@ export default function Page() {
           setStage("brief");
           return null;
         }
+        if (stopOnJunk(d)) return null;
         throw new RequestError(fromResponse(r.status, d, (body as { mode: ReqMode }).mode));
       }
+      noteLeftOut(r);
       const reader = r.body!.getReader();
       const dec = new TextDecoder();
       while (true) {
@@ -792,12 +815,14 @@ export default function Page() {
     persistPrefs();
     setBusy("analyze");
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "analyze", brief, persona: profile?.persona, strict: simple }) });
       const d = await readJson(r);
       if (d.code === "unclear_objective") {
         setObjErr(UNCLEAR);
         return;
       }
+      if (stopOnJunk(d)) return;
+      noteLeftOut(r);
       if (!r.ok) throw new RequestError(fromResponse(r.status, d, "analyze"));
       if (!Array.isArray(d.questions)) throw new RequestError(fromResponse(502, { code: "empty_output" }, "analyze"));
       setAnalysis(d as unknown as Analysis);
@@ -847,7 +872,7 @@ export default function Page() {
     persistPrefs();
     setBusy("generate");
     try {
-      await finish(await stream({ mode: "generate", brief: b, clarifications: clar }), `${fw.name}${b.chain ? " chain" : ""}`, b);
+      await finish(await stream({ mode: "generate", brief: b, clarifications: clar, strict: simple }), `${fw.name}${b.chain ? " chain" : ""}`, b);
     } finally {
       setBusy(null);
     }
@@ -904,11 +929,13 @@ export default function Page() {
     if (!objectiveOk()) return;
     setErrorState(null);
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "template", brief, clarifications: clar, persona: profile?.persona }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "template", brief, clarifications: clar, persona: profile?.persona, strict: simple }) });
       const d = await readJson(r);
+      if (stopOnJunk(d)) return;
       if (!r.ok) throw new RequestError(fromResponse(r.status, d, "template"));
       if (typeof d.text !== "string" || !d.text.trim()) throw new RequestError(fromResponse(502, { code: "empty_output" }, "template"));
       setLeftOut(gibNow);
+      noteLeftOut(r);
       await pushVersion(d.text, `${fw.name} template`);
       setStage("forge");
     } catch (e) {

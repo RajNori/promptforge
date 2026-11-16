@@ -59,12 +59,13 @@ const Clarifications = z
 const Persona = z.enum(PERSONA_IDS).optional().catch(undefined);
 
 export const BodySchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("analyze"), brief: BriefSchema, persona: Persona }),
+  /** strict: Simple mode, where a field that isn't words stops the run (Advanced leaves it out instead). */
+  z.object({ mode: z.literal("analyze"), brief: BriefSchema, persona: Persona, strict: bool }),
   /** Live example placeholders for the form, tailored to the objective. Free, separately rate-limited. */
   z.object({ mode: z.literal("hints"), brief: BriefSchema, persona: Persona }),
-  z.object({ mode: z.literal("generate"), brief: BriefSchema, clarifications: Clarifications, persona: Persona }),
+  z.object({ mode: z.literal("generate"), brief: BriefSchema, clarifications: Clarifications, persona: Persona, strict: bool }),
   /** Quick draft (no AI): compiled here, not in the browser, so it passes the same input checks as every other path. */
-  z.object({ mode: z.literal("template"), brief: BriefSchema, clarifications: Clarifications, persona: Persona }),
+  z.object({ mode: z.literal("template"), brief: BriefSchema, clarifications: Clarifications, persona: Persona, strict: bool }),
   z.object({
     mode: z.literal("refine"),
     brief: BriefSchema,
