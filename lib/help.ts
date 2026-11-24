@@ -188,3 +188,55 @@ TASK TYPE: ${b.taskType}
 ${b.context.trim() ? `CONTEXT SO FAR: ${b.context.trim().slice(0, 600)}\n` : ""}FIELDS: ${fields.join(", ")}
 (role = the expert the AI should act as; context = background the AI needs; audience = who it's for; tone = how it should sound; deliverable = what to hand back; successCriteria = how to judge it; rule/why = one must-do or don't and its reason; inputs = material the person can provide; outputFormat = structure and length of the answer)`;
 }
+
+/**
+ * Autofill provenance. Remembers which field values the AI wrote and what the rest of the brief looked like
+ * then, so editing an input afterwards can flag the AI-written fields that were based on the old version.
+ * A field stops being "AI-owned" the moment the user edits it, and is never overwritten by a refresh.
+ */
+export type FillRecord = Partial<Record<SuggestField, { v: string; basis: string }>>;
+
+function fieldValue(b: Brief, f: SuggestField): string {
+  if (f === "rules") return JSON.stringify(b.rules.map((r) => r.rule.trim()).filter(Boolean));
+  return String(b[f] ?? "").trim();
+}
+
+/** AI-written fields whose value is still exactly what the AI wrote. */
+export function ownedFields(b: Brief, rec: FillRecord): SuggestField[] {
+  return (Object.keys(rec) as SuggestField[]).filter((f) => !isEmpty(b, f) && rec[f]!.v === fieldValue(b, f));
+}
+
+/** What the AI's values depend on: everything the user wrote. AI-owned fields count as blank. */
+function basisOf(b: Brief, rec: FillRecord): string {
+  const owned = new Set(ownedFields(b, rec));
+  return JSON.stringify([b.taskType, b.target, ...SUGGEST_FIELDS.map((f) => (owned.has(f) ? "" : fieldValue(b, f)))]);
+}
+
+/** Record a fill: `before` is the brief the request was made from, `values` what came back. */
+export function recordFill(rec: FillRecord, before: Brief, values: Partial<Brief>): FillRecord {
+  const next = { ...before, ...values } as Brief;
+  const out: FillRecord = {};
+  for (const f of ownedFields(next, rec)) out[f] = rec[f];
+  const keys = (Object.keys(values) as SuggestField[]).filter((f) => SUGGEST_FIELDS.includes(f) && !isEmpty(next, f));
+  for (const f of keys) out[f] = { v: fieldValue(next, f), basis: "" };
+  const basis = basisOf(next, out);
+  for (const f of keys) out[f] = { v: out[f]!.v, basis };
+  return out;
+}
+
+/** AI-written, untouched fields that were filled from an older version of the user's inputs. */
+export function staleFields(b: Brief, rec: FillRecord): SuggestField[] {
+  const owned = ownedFields(b, rec);
+  if (!owned.length) return [];
+  const now = basisOf(b, rec);
+  return owned.filter((f) => rec[f]!.basis !== now);
+}
+
+/** Drop AI-owned records for fields the user has since edited, so they can never come back as "owned". */
+export function pruneFill(b: Brief, rec: FillRecord): FillRecord {
+  const owned = ownedFields(b, rec);
+  if (owned.length === Object.keys(rec).length) return rec;
+  const out: FillRecord = {};
+  for (const f of owned) out[f] = rec[f];
+  return out;
+}
