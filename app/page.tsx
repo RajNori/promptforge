@@ -34,7 +34,7 @@ import { useProfile } from "./useProfile";
 import { OBJECTIVE_EXAMPLE, UNCLEAR_FIELD_MSG, UNCLEAR_OBJECTIVE_MSG, isGibberishField, isGibberishObjective } from "@/lib/objective";
 import { placeholderFor } from "@/lib/placeholders";
 import { PERSONAS, PERSONA_TASK, TOOLS, defaultProfile, persona as personaOf, targetFor, templateBrief, type Mode, type PersonaId, type Profile, type Template } from "@/lib/personas";
-import { FIELD_HELP, applicableFields, hasSignal, isEmpty, type SuggestField } from "@/lib/help";
+import { FIELD_HELP, applicableFields, hasSignal, isEmpty, recordFill, staleFields, type FillRecord, type SuggestField } from "@/lib/help";
 
 type Stage = "brief" | "clarify" | "forge";
 type Theme = "system" | "light" | "dark";
@@ -240,6 +240,8 @@ export default function Page() {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [, setTick] = useState(0);
   const [sparking, setSparking] = useState<SuggestField | "all" | null>(null);
+  /** Which field values the AI wrote, and from which version of the user's inputs (see lib/help FillRecord). */
+  const [filled, setFilled] = useState<FillRecord>({});
   /** Previous prompt's output kept as read-only reference after New / Start fresh. Session-only; never saved into the new prompt. */
   const [reference, setReference] = useState<{ text: string; label: string; title: string } | null>(null);
   const [viewRef, setViewRef] = useState(false);
@@ -391,7 +393,11 @@ export default function Page() {
   // Audience/Tone are on screen in Simple mode (or once filled) even when the framework doesn't need them; keep the
   // fill list and the server's allowed list in step with what's visible, or ✦ on them fails as "Unknown field".
   const showAudienceTone = simple || fw.usesAudienceTone || !!brief.audience.trim() || !!brief.tone.trim();
-  const blanks = applicableFields(effective, { audienceTone: showAudienceTone }).filter((f) => isEmpty(brief, f));
+  const fillable = applicableFields(effective, { audienceTone: showAudienceTone });
+  const blanks = fillable.filter((f) => isEmpty(brief, f));
+  // AI-filled fields the user hasn't touched, filled from inputs the user has since changed. Refreshable.
+  const stale = staleFields(brief, filled).filter((f) => fillable.includes(f));
+  const toFill = [...blanks, ...stale];
   // Only the fields on screen in this mode are judged, so a Simple-mode user is never stopped by a hidden field.
   const onScreen: GibField[] = ["context", "deliverable", "successCriteria", "rules"];
   if (showAudienceTone) onScreen.push("audience", "tone");
@@ -711,8 +717,13 @@ export default function Page() {
     persistPrefs();
     setSparking(field);
     const prev = brief;
+    const prevFill = filled;
+    // "All" also refreshes stale AI-filled fields: send them blank so the server refills them from the current inputs,
+    // without anchoring on the old values. Fields the user wrote or edited are never sent blank.
+    const refreshing = field === "all" ? stale : [];
+    const sent: Brief = refreshing.length ? { ...brief, ...Object.fromEntries(refreshing.map((f) => [f, EMPTY_BRIEF[f]])) } : brief;
     try {
-      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
+      const r = await fetch("/api/generate", { method: "POST", headers, body: JSON.stringify({ mode: "suggest", brief: sent, field, audienceTone: showAudienceTone, persona: profile?.persona }) });
       const d = await readJson(r);
       if (!r.ok) throw new RequestError(fromResponse(r.status, d, "suggest"));
       if (!d.values || typeof d.values !== "object") throw new RequestError(fromResponse(502, { code: "empty_output" }, "suggest"));
@@ -720,10 +731,14 @@ export default function Page() {
       const values = d.values as Partial<Brief>;
       const keys = Object.keys(values) as SuggestField[];
       setBrief((b) => ({ ...b, ...values }));
+      setFilled((rec) => recordFill(rec, sent, values));
       const names = keys.map((k) => FIELD_HELP[k].label);
       const gaps = JSON.stringify(values).match(/\[[^\]]{2,60}\]/g)?.length ?? 0;
-      const base = field === "all" ? `Filled ${keys.length} field${keys.length === 1 ? "" : "s"}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`;
-      showToast(gaps ? `${base} — replace the ${gaps} [bracketed] detail${gaps === 1 ? "" : "s"} only you know` : field === "all" ? `${base}: ${names.join(", ")}` : base, prev, gaps ? 14000 : 9000);
+      const base = field === "all" ? `${refreshing.length ? "Updated" : "Filled"} ${keys.length} field${keys.length === 1 ? "" : "s"}` : `${isEmpty(prev, field) ? "Filled" : "Improved"} ${names[0]}`;
+      showToast(gaps ? `${base} — replace the ${gaps} [bracketed] detail${gaps === 1 ? "" : "s"} only you know` : field === "all" ? `${base}: ${names.join(", ")}` : base,
+        [{ label: "Undo", run: () => (setBrief(prev), setFilled(prevFill)) }],
+        gaps ? 14000 : 9000,
+      );
     } catch (e) {
       const f = fromException(e);
       if (!f) return;
@@ -768,6 +783,7 @@ export default function Page() {
     setFromTemplate(null);
     setDriftDismissed(false);
     setBrief({ ...EMPTY_BRIEF, ...defaults });
+    setFilled({});
     setAnalysis(null);
     setAnswers([]);
     setFeedback("");
@@ -1352,14 +1368,19 @@ export default function Page() {
                   {canAI && (
                     <button
                       className={`btn ghost ai ${sparking === "all" ? "busy" : ""}`}
-                      disabled={!signal || !blanks.length || !!sparking || !!busy}
+                      disabled={!signal || !toFill.length || !!sparking || !!busy}
                       onClick={() => suggest("all")}
-                      title={!signal ? "Add an objective or context first" : blanks.length ? `AI fills: ${blanks.map((f) => FIELD_HELP[f].label).join(", ")}` : "No blank fields"}
+                      title={!signal ? "Add an objective or context first" : toFill.length ? `AI fills: ${toFill.map((f) => FIELD_HELP[f].label).join(", ")}` : "No blank or out-of-date fields"}
                     >
-                      {StarIcon} {sparking === "all" ? "Filling…" : `Autofill blanks${blanks.length ? ` (${blanks.length})` : ""}`}
+                      {StarIcon} {sparking === "all" ? "Filling…" : `${stale.length && !blanks.length ? "Refresh autofill" : stale.length ? "Autofill & refresh" : "Autofill blanks"}${toFill.length ? ` (${toFill.length})` : ""}`}
                     </button>
                   )}
                 </div>
+                {canAI && stale.length > 0 && !sparking && (
+                  <p className="note">
+                    You changed the brief after autofill, so {stale.length > 3 ? `${stale.length} autofilled fields` : stale.map((f) => FIELD_HELP[f].label).join(", ")} may be out of date. Refresh autofill to update {stale.length === 1 ? "it" : "them"}; fields you edited stay as they are.
+                  </p>
+                )}
                 {server && !canAI && <p className="note">AI generation isn&apos;t available right now, so this builds a template from your brief. Add context and success criteria for a better result.</p>}
                 {!ready && brief.objective.trim() && <p className="note">Add a few more words to the objective, such as who it&apos;s for or what the result is.</p>}
                 {!ready && !brief.objective.trim() && <p className="note">Write an objective to continue{canAI ? (asking ? " — one sentence is enough, we'll ask for the rest" : " — or add some context and use ✦ to draft it") : ""}.</p>}
